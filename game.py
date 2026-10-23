@@ -5,8 +5,8 @@ An endless, procedurally generated lunar surface in strict 2:1 isometric,
 with a jetpacking Jetman under tank-style controls, and spiky aliens that
 bounce about the surface for him to sweep up with his laser.
 
-Run:            python3 game.py            (full screen; F toggles, Esc quits)
-                python3 game.py --windowed
+Run:            python3 game.py            (1280x720 window; F toggles full screen, Esc quits)
+                python3 game.py --fullscreen
 Screenshots:    python3 game.py --shot NAME [SCENE]   -> ../lunar_poc/NAME.png
                 python3 game.py --facings NAME        -> ../lunar_poc/NAME.png
 Benchmark:      python3 game.py --bench
@@ -795,10 +795,12 @@ def alien_sheet(screen, out):
 def main():
     pygame.init()
     headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens"))
-    if headless or "--windowed" in sys.argv:
+    if headless:
         screen = pygame.display.set_mode((W, H))
-    else:
+    elif "--fullscreen" in sys.argv:
         screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN | pygame.SCALED)
+    else:                                   # start in a 1280x720 window; F toggles full screen
+        screen = pygame.display.set_mode((W, H), pygame.SCALED)
     pygame.display.set_caption("Moon Sweeper")
     outdir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lunar_poc"))
     os.makedirs(outdir, exist_ok=True)

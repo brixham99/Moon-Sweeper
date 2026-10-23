@@ -4,8 +4,8 @@ An endless, procedurally generated lunar surface in strict 2:1 isometric, with a
 jetpacking Jetman under tank-style controls. pygame 2 + numpy.
 
 ## Run
-    python3 game.py              # full screen (F toggles, Esc quits)
-    python3 game.py --windowed
+    python3 game.py              # 1280x720 window (F toggles full screen, Esc quits)
+    python3 game.py --fullscreen # start in full screen
     python3 game.py --shot NAME [walk|high|fire|behind|far]   # -> ../lunar_poc/NAME.png
     python3 game.py --facings NAME                             # sprite sheet of all facings
     python3 game.py --bench
