@@ -20,6 +20,8 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pygame
 
+import rover as rv
+
 TW, TH = 64, 32            # strict 2:1 isometric tile
 HW, HH = TW // 2, TH // 2
 CHUNK = 16                 # tiles per chunk side
@@ -202,6 +204,7 @@ class World:
         global SEED
         SEED = seed
         self.start = start
+        self.rover = (start[0] + 0.4, start[1] - 4.8)    # parked just behind the landing spot, nose south-east
         self.raw = {}        # (ci, cj) -> (craters, rocks) born in that chunk
         self.rocks = {}      # (ci, cj) -> rocks sitting in that chunk
         self.ground = {}     # (ci, cj) -> Surface
@@ -259,8 +262,10 @@ class World:
                 if r.random() < 0.6:
                     rock(x + r.uniform(-.9, .9), y + r.uniform(-.9, .9), r.uniform(0.25, 0.6))
         sx, sy = self.start                        # keep the landing site clear
-        rocks = [k for k in rocks if (k.x - sx) ** 2 + (k.y - sy) ** 2 > 7]
-        craters = [c for c in craters if (c[0] - sx) ** 2 + (c[1] - sy) ** 2 > (c[2] + 2.5) ** 2]
+        rx, ry = self.rover
+        rocks = [k for k in rocks if (k.x - sx) ** 2 + (k.y - sy) ** 2 > 7 and not rv.in_footprint(rx, ry, k.x, k.y, 1.6)]
+        craters = [c for c in craters if (c[0] - sx) ** 2 + (c[1] - sy) ** 2 > (c[2] + 2.5) ** 2
+                   and (c[0] - rx) ** 2 + (c[1] - ry) ** 2 > (c[2] + 3.2) ** 2]
         craters.sort(key=lambda c: -c[2])          # big (old) first; younger, smaller ones carve into them
         self.raw[k] = (craters, rocks)
         return self.raw[k]
@@ -279,6 +284,8 @@ class World:
         return self.rocks[k]
 
     def blocked(self, x, y, z, rad=0.3):
+        if z < rv.height_at(self.rover[0], self.rover[1], x, y, rad) * 0.95:
+            return True
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
@@ -289,7 +296,7 @@ class World:
 
     def floor_at(self, x, y):
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
-        f = 0.0
+        f = rv.height_at(self.rover[0], self.rover[1], x, y)
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
                 for rk in self.chunk_rocks(ci + di, cj + dj):

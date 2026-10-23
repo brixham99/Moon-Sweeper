@@ -28,6 +28,7 @@ import world as wd
 from world import CHUNK, CW, HH, HW, TH, TW, to_screen
 import jetman as jm
 import aliens as al
+import rover as rv
 import sfx as sx
 from jetman import JetmanSprites
 
@@ -39,7 +40,7 @@ def sprite_cache_path():
     import hashlib
     here = os.path.dirname(os.path.abspath(__file__))
     h = hashlib.sha1()
-    for fn in ("jetman.py", "aliens.py"):
+    for fn in ("jetman.py", "aliens.py", "rover.py"):
         with open(os.path.join(here, fn), "rb") as f:
             h.update(f.read())
     return os.path.join(os.path.expanduser("~"), ".cache", "moon-sweeper", f"sprites-{h.hexdigest()[:12]}.pkl")
@@ -50,7 +51,7 @@ def load_sprite_cache(path):
     try:
         with open(path, "rb") as f:
             res = pickle.load(f)
-        return res if len(res) == len(jm.all_keys()) + len(al.all_keys()) else None
+        return res if len(res) == len(jm.all_keys()) + len(al.all_keys()) + 1 else None
     except Exception:
         return None
 
@@ -131,6 +132,7 @@ class Game:
         # every Jetman/alien frame is drawn in the worker processes, off the main
         # thread, then kept in a small disk cache so later start-ups are quick
         self.alien_spr = al.AlienSprites()
+        self.rover_spr = None
         self.frame_res, self.cache_path = [], sprite_cache_path()
         cached = load_sprite_cache(self.cache_path)
         if cached:
@@ -140,6 +142,7 @@ class Game:
         else:
             self.jet_jobs = [self.world.sprite_pool.submit(jm.frame_bytes, k) for k in jm.all_keys()]
             self.jet_jobs += [self.world.sprite_pool.submit(al.frame_bytes, k) for k in al.all_keys()]
+            self.jet_jobs.insert(0, self.world.sprite_pool.submit(rv.frame_bytes))
         self.n_frames = len(self.jet_jobs)
         self.aliens = {}            # uid -> Alien
         self.spawned = set()        # chunks whose aliens are out
@@ -166,7 +169,9 @@ class Game:
                 self.frame_res = None
 
     def accept_frame(self, res):
-        if isinstance(res[0][0], str):
+        if res[0] == "rover":
+            self.rover_spr = rv.make_sprite(res)
+        elif isinstance(res[0][0], str):
             self.alien_spr.accept(res)
         else:
             jm.accept(self.jet.cache, res)
@@ -545,19 +550,39 @@ class Game:
         fl = self.floor()
         alt = max(0.0, self.z - fl)
         self.draw_splats(cx, cy)
+        if self.rover_spr:
+            sh, sx_, sy_ = self.rover_spr[3:]
+            px, py = to_screen(*self.world.rover)
+            sc.blit(sh, (px - cx - sx_, py - cy - sy_))
         self.draw_alien_shadows(cx, cy)
         self.draw_shadow(cx, cy, fl, alt)
         # depth-sorted objects
         items = []
+        rx, ry = self.world.rover
+        RK = rx + ry
+
+        def key(x, y, own, r=0.3):
+            # iso box rule against the rover, so its long diagonal body sorts right
+            rel = rv.relation(rx, ry, x, y, r)
+            return max(own, RK + 0.01) if rel > 0 else (min(own, RK - 0.01) if rel < 0 else own)
         for (ci, cj) in self.visible_chunks(cx, cy, 260):
             for rk in self.world.chunk_rocks(ci, cj):
-                items.append((rk.x + rk.y, 0, rk))
-        items.append((self.x + self.y + 0.01, 1, None))
+                items.append((key(rk.x, rk.y, rk.x + rk.y, rk.size * 0.5), 0, rk))
+        jd = key(self.x, self.y, self.x + self.y + 0.01)
+        top = rv.height_at(rx, ry, self.x, self.y, 0.3)
+        if top > 0 and self.z >= top * 0.9:
+            jd = max(jd, RK + 0.02)                   # on (or just over) the rover: draw him on top
+        items.append((jd, 1, None))
+        if self.rover_spr:
+            items.append((RK, 5, None))
         for p in self.parts:
             if p.kind == "dust":
-                items.append((p.x + p.y, 3, p))
+                items.append((key(p.x, p.y, p.x + p.y, 0.1), 3, p))
         for a in self.aliens.values():
-            items.append((a.x + a.y + 0.005, 4, a))
+            ak = key(a.x, a.y, a.x + a.y + 0.005, 0.28)
+            if a.z >= rv.height_at(rx, ry, a.x, a.y, 0.28) * 0.9 and rv.in_footprint(rx, ry, a.x, a.y, 0.28):
+                ak = max(ak, RK + 0.015)
+            items.append((ak, 4, a))
         items.sort(key=lambda t: t[0])
         jet_rect = None
         front = []
@@ -575,6 +600,18 @@ class Game:
                 if jet_rect is not None:
                     front.append((surf, pos))
                 if watched:
+                    rr = pygame.Rect(pos, surf.get_size())
+                    for w_ in watched:
+                        if rr.colliderect(w_[2]):
+                            w_[3].append((surf, pos))
+            elif kind == 5:
+                surf, ox, oy = self.rover_spr[:3]
+                px, py = to_screen(rx, ry)
+                pos = (px - cx - ox, py - cy - oy)
+                if pos[0] < W and pos[0] + surf.get_width() > 0 and pos[1] < H and pos[1] + surf.get_height() > 0:
+                    sc.blit(surf, pos)
+                    if jet_rect is not None:
+                        front.append((surf, pos))
                     rr = pygame.Rect(pos, surf.get_size())
                     for w_ in watched:
                         if rr.colliderect(w_[2]):
@@ -764,6 +801,9 @@ SCENES = {
     "far": [(0.6, {"jet": 1, "up": 1}), (0.25, {"up": 1, "fire": 1})],
     "aliens": [(1.6, {}), (0.5, {"right": 1})],
     "airborne": [(0.016, {})],
+    "rover": [(0.3, {"left": 1}), (0.05, {})],
+    "rover_behind": [(0.35, {"up": 1}), (0.05, {})],
+    "rover_front": [(0.3, {"up": 1}), (0.05, {})],
     "pop": [(0.25, {}), (1.2, {"fire": 1})],
     "hover": [(0.45, {"jet": 1}), (0.4, {"jet": 1, "up": 1})],
 }
@@ -798,6 +838,18 @@ def ring_of_aliens(game, n=7, rad=2.6, seed=3):
 
 
 def setup_scene(game, scene):
+    if scene in ("rover", "rover_behind", "rover_front"):
+        game.update(1 / FPS, {})
+        for uid in list(game.aliens):       # a tidy shot of the rover
+            if (game.aliens[uid].x - game.x) ** 2 + (game.aliens[uid].y - game.y) ** 2 < 64:
+                del game.aliens[uid]
+    if scene in ("rover_behind", "rover_front"):
+        rx, ry = game.world.rover
+        if scene == "rover_behind":          # north of it, walking towards it (south-west)
+            game.x, game.y, game.a = rx - 0.6, ry - rv.HALF_W - 1.3, math.pi / 2
+        else:                                # just past the nose, in front of it
+            game.x, game.y, game.a = rx + rv.HALF_L + 1.0, ry + 0.9, -math.pi / 2
+        game.cam = list(to_screen(game.x, game.y))
     if scene in ("aliens", "airborne", "pop"):
         game.update(1 / FPS, {})            # let the natural spawn happen first
         for uid in list(game.aliens):       # keep the shot tidy: only staged aliens near him
