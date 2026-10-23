@@ -94,9 +94,9 @@ class Game:
         self.hidden = False
         self.frame_ms = []
         # every Jetman frame is drawn in the worker processes, off the main thread
-        self.jet_jobs = [self.world.procs.submit(jm.frame_bytes, k) for k in jm.all_keys()]
+        self.jet_jobs = [self.world.sprite_pool.submit(jm.frame_bytes, k) for k in jm.all_keys()]
         self.alien_spr = al.AlienSprites()
-        self.jet_jobs += [self.world.procs.submit(al.frame_bytes, k) for k in al.all_keys()]
+        self.jet_jobs += [self.world.sprite_pool.submit(al.frame_bytes, k) for k in al.all_keys()]
         self.aliens = {}            # uid -> Alien
         self.spawned = set()        # chunks whose aliens are out
         self.killed = set()         # uids popped for good
