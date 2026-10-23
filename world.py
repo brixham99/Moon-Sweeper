@@ -217,9 +217,9 @@ class World:
         # on a 4-core Mac (2 workers) that backlog took ~30 s, and the main
         # thread, waiting for its first ground chunk, froze (spinning beachball).
         n = max(2, min(6, (os.cpu_count() or 4) - 2))
-        self.procs = ProcessPoolExecutor(max_workers=max(1, n // 2 + n % 2))   # ground only
-        self.sprite_pool = ProcessPoolExecutor(max_workers=max(2, n - n // 2 - n % 2))
-        self.rock_pool = self.sprite_pool
+        self.procs = ProcessPoolExecutor(max_workers=n)   # ground + boulders
+        self.sprite_pool = ProcessPoolExecutor(max_workers=max(2, min(6, (os.cpu_count() or 4) - 1)))   # busy only while loading
+        self.rock_pool = self.procs          # boulders must not queue behind the sprite frames
         for _ in range(2):
             threading.Thread(target=self._builder, daemon=True).start()
 

@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 
-if any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens")):
+if any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--loadshot")):
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     os.environ["SDL_AUDIODRIVER"] = "dummy"
 
@@ -32,6 +32,41 @@ import sfx as sx
 from jetman import JetmanSprites
 
 W, H = 1280, 720
+
+
+def sprite_cache_path():
+    """Cache file named after a hash of the sprite code, so any change rebuilds it."""
+    import hashlib
+    here = os.path.dirname(os.path.abspath(__file__))
+    h = hashlib.sha1()
+    for fn in ("jetman.py", "aliens.py"):
+        with open(os.path.join(here, fn), "rb") as f:
+            h.update(f.read())
+    return os.path.join(os.path.expanduser("~"), ".cache", "moon-sweeper", f"sprites-{h.hexdigest()[:12]}.pkl")
+
+
+def load_sprite_cache(path):
+    import pickle
+    try:
+        with open(path, "rb") as f:
+            res = pickle.load(f)
+        return res if len(res) == len(jm.all_keys()) + len(al.all_keys()) else None
+    except Exception:
+        return None
+
+
+def save_sprite_cache(path, res):
+    import pickle
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        for old in os.listdir(os.path.dirname(path)):          # drop stale versions
+            if old.startswith("sprites-") and old != os.path.basename(path):
+                os.remove(os.path.join(os.path.dirname(path), old))
+        with open(path + ".tmp", "wb") as f:
+            pickle.dump(res, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(path + ".tmp", path)
+    except Exception:
+        pass
 FPS = 60
 BLACK = (0, 0, 0)          # the sky: pure black. No stars, no moon.
 
@@ -93,10 +128,19 @@ class Game:
         self.glow = self._glow_sprite()
         self.hidden = False
         self.frame_ms = []
-        # every Jetman frame is drawn in the worker processes, off the main thread
-        self.jet_jobs = [self.world.sprite_pool.submit(jm.frame_bytes, k) for k in jm.all_keys()]
+        # every Jetman/alien frame is drawn in the worker processes, off the main
+        # thread, then kept in a small disk cache so later start-ups are quick
         self.alien_spr = al.AlienSprites()
-        self.jet_jobs += [self.world.sprite_pool.submit(al.frame_bytes, k) for k in al.all_keys()]
+        self.frame_res, self.cache_path = [], sprite_cache_path()
+        cached = load_sprite_cache(self.cache_path)
+        if cached:
+            for res in cached:
+                self.accept_frame(res)
+            self.jet_jobs, self.frame_res = [], None
+        else:
+            self.jet_jobs = [self.world.sprite_pool.submit(jm.frame_bytes, k) for k in jm.all_keys()]
+            self.jet_jobs += [self.world.sprite_pool.submit(al.frame_bytes, k) for k in al.all_keys()]
+        self.n_frames = len(self.jet_jobs)
         self.aliens = {}            # uid -> Alien
         self.spawned = set()        # chunks whose aliens are out
         self.killed = set()         # uids popped for good
@@ -111,13 +155,21 @@ class Game:
             for fu in self.jet_jobs:
                 if fu.done():
                     res = fu.result()
-                    if isinstance(res[0][0], str):
-                        self.alien_spr.accept(res)
-                    else:
-                        jm.accept(self.jet.cache, res)
+                    self.accept_frame(res)
+                    if self.frame_res is not None:
+                        self.frame_res.append(res)
                 else:
                     left.append(fu)
             self.jet_jobs = left
+            if not left and self.frame_res:
+                threading.Thread(target=save_sprite_cache, args=(self.cache_path, self.frame_res), daemon=True).start()
+                self.frame_res = None
+
+    def accept_frame(self, res):
+        if isinstance(res[0][0], str):
+            self.alien_spr.accept(res)
+        else:
+            jm.accept(self.jet.cache, res)
 
     @staticmethod
     def _glow_sprite():
@@ -383,6 +435,60 @@ class Game:
         return surf, pos
 
     # ------------------------------------------------------------ world streaming
+    def load_step(self):
+        """One non-blocking slice of start-up work. Returns (ready, total, status)."""
+        w = self.world
+        self.stream()
+        self.collect_frames()
+        w.collect(4)
+        w.collect_rocks(0.008)
+        cx, cy = self.cam[0] - W / 2, self.cam[1] - H / 2
+        gnd = self.visible_chunks(cx, cy)
+        rks = self.visible_chunks(cx, cy, 260)
+        for k in gnd:
+            w.request_ground(*k)
+        for k in rks:
+            w.request_rocks(*k)
+        f_ok = self.n_frames - len(self.jet_jobs)
+        g_ok = sum(1 for k in gnd if w.ground_ready(*k))
+        r_ok = sum(1 for k in rks if k in w.rock_done)
+        total = self.n_frames + len(gnd) + len(rks)
+        if g_ok < len(gnd):
+            msg = "Preparing the lunar surface..."
+        elif r_ok < len(rks):
+            msg = "Scattering the boulders..."
+        elif f_ok < self.n_frames:
+            msg = "Suiting up Jetman and waking the aliens..."
+        else:
+            msg = "Ready for launch!"
+        return f_ok + g_ok + r_ok, total, msg
+
+    def draw_loading(self, ready, total, msg):
+        sc = self.screen
+        sc.fill(BLACK)
+        t = self.big.render("Moon Sweeper", True, (222, 222, 218))
+        sc.blit(t, t.get_rect(center=(W // 2, H // 2 - 60)))
+        bw, bh = 520, 18
+        x0, y0 = W // 2 - bw // 2, H // 2 - bh // 2
+        pygame.draw.rect(sc, (58, 58, 60), (x0, y0, bw, bh), border_radius=4)
+        fw = int(bw * ready / max(1, total))
+        if fw > 0:
+            pygame.draw.rect(sc, (176, 176, 172), (x0, y0, fw, bh), border_radius=4)
+        pygame.draw.rect(sc, (120, 120, 122), (x0, y0, bw, bh), 1, border_radius=4)
+        m = self.font.render(msg, True, (150, 150, 148))
+        sc.blit(m, m.get_rect(center=(W // 2, H // 2 + 40)))
+        p = self.font.render(f"{100 * ready // max(1, total)}%", True, (110, 110, 110))
+        sc.blit(p, p.get_rect(center=(W // 2, H // 2 + 70)))
+
+    def wait_ready(self, timeout=600):
+        """Headless: block (politely) until start-up work is done."""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            r, n, _ = self.load_step()
+            if r >= n:
+                return
+            time.sleep(0.01)
+
     def visible_chunks(self, cx, cy, margin=140):
         us, vs = [], []
         for sx, sy in ((-margin, -margin), (W + margin, -margin), (-margin, H + margin + 120), (W + margin, H + margin + 120)):
@@ -794,7 +900,7 @@ def alien_sheet(screen, out):
 
 def main():
     pygame.init()
-    headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens"))
+    headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--loadshot"))
     if headless:
         screen = pygame.display.set_mode((W, H))
     elif "--fullscreen" in sys.argv:
@@ -822,8 +928,7 @@ def main():
         game = Game(screen, start=start)
         if scene == "behind":
             place_behind_boulder(game)
-        while game.jet_jobs:
-            game.collect_frames(); time.sleep(0.02)
+        game.wait_ready()
         setup_scene(game, scene)
         if scene == "pop":
             dt = 1 / FPS
@@ -839,13 +944,20 @@ def main():
         print("saved", name, f"at {game.x:.1f},{game.y:.1f} alt {game.z:.0f} hidden={game.hidden}")
         return
     game = Game(screen)
+    if "--loadshot" in sys.argv:          # screenshot of the loading screen part-way through
+        while True:
+            r, n, m = game.load_step()
+            if r >= n * 0.45:
+                break
+            time.sleep(0.01)
+        game.draw_loading(r, n, m)
+        pygame.image.save(screen, os.path.join(outdir, "ms_loading.png"))
+        print("saved ms_loading", r, n)
+        return
     if "--bench" in sys.argv:
         # fly fast in a straight line so new chunks stream in all the way
         game.a = 0.3
-        for _ in range(3):
-            game.draw()
-        while game.jet_jobs:
-            game.collect_frames(); time.sleep(0.05)
+        game.wait_ready()
         times = []
         n = 1200
         for f in range(n):
@@ -860,6 +972,32 @@ def main():
               f"cached now {len(game.world.ground)}")
         return
     clock = pygame.time.Clock()
+    # loading screen: pump events every frame, never block, until all is ready
+    t_start = time.time()
+    while True:
+        clock.tick(FPS)
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
+                pygame.quit(); return
+            if e.type == pygame.KEYDOWN and e.key == pygame.K_f:
+                pygame.display.toggle_fullscreen()
+        ready, total, msg = game.load_step()
+        game.draw_loading(ready, total, msg)
+        pygame.display.flip()
+        if ready >= total:
+            break
+    print(f"ready after {time.time() - t_start:.1f} s", flush=True)
+    # brief fade in from black, then play
+    veil = pygame.Surface((W, H)); veil.fill(BLACK)
+    for i in range(24):
+        clock.tick(FPS)
+        pygame.event.pump()
+        game.draw()
+        veil.set_alpha(int(255 * (1 - (i + 1) / 24)))
+        game.screen.blit(veil, (0, 0))
+        pygame.display.flip()
+    pygame.event.clear()
+    clock.tick(FPS)
     while True:
         dt = min(clock.tick(FPS) / 1000.0, 1 / 20)
         for e in pygame.event.get():
