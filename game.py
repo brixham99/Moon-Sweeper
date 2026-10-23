@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Lunar Jetman (isometric) - proof of concept.
+"""Moon Sweeper.
 
 An endless, procedurally generated lunar surface in strict 2:1 isometric,
-with a jetpacking Jetman under tank-style controls.
+with a jetpacking Jetman under tank-style controls, and spiky aliens that
+bounce about the surface for him to sweep up with his laser.
 
 Run:            python3 game.py            (full screen; F toggles, Esc quits)
                 python3 game.py --windowed
@@ -17,7 +18,7 @@ import sys
 import threading
 import time
 
-if "--shot" in sys.argv or "--bench" in sys.argv or "--facings" in sys.argv:
+if any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens")):
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     os.environ["SDL_AUDIODRIVER"] = "dummy"
 
@@ -26,6 +27,8 @@ import pygame
 import world as wd
 from world import CHUNK, CW, HH, HW, TH, TW, to_screen
 import jetman as jm
+import aliens as al
+import sfx as sx
 from jetman import JetmanSprites
 
 W, H = 1280, 720
@@ -66,7 +69,8 @@ class Particle:
 
 
 class Game:
-    def __init__(self, screen, seed=wd.SEED, start=START):
+    def __init__(self, screen, seed=wd.SEED, start=START, sound_log=False):
+        self.sfx = sx.SFX(log=sound_log)
         self.screen = screen
         self.world = wd.World(seed, start)
         self.jet = JetmanSprites()
@@ -91,6 +95,14 @@ class Game:
         self.frame_ms = []
         # every Jetman frame is drawn in the worker processes, off the main thread
         self.jet_jobs = [self.world.procs.submit(jm.frame_bytes, k) for k in jm.all_keys()]
+        self.alien_spr = al.AlienSprites()
+        self.jet_jobs += [self.world.procs.submit(al.frame_bytes, k) for k in al.all_keys()]
+        self.aliens = {}            # uid -> Alien
+        self.spawned = set()        # chunks whose aliens are out
+        self.killed = set()         # uids popped for good
+        self.splats = []            # goo decals: [x, y, colour, age]
+        self.hit_t = 9.0
+        self.pops = 0
 
     # ------------------------------------------------------------ helpers
     def collect_frames(self):
@@ -98,7 +110,11 @@ class Game:
             left = []
             for fu in self.jet_jobs:
                 if fu.done():
-                    jm.accept(self.jet.cache, fu.result())
+                    res = fu.result()
+                    if isinstance(res[0][0], str):
+                        self.alien_spr.accept(res)
+                    else:
+                        jm.accept(self.jet.cache, res)
                 else:
                     left.append(fu)
             self.jet_jobs = left
@@ -171,6 +187,7 @@ class Game:
                                      LASER_COLS[self.laser_n % len(LASER_COLS)]))
             self.cool = 0.13
             self.fire_t = 0.0
+            self.sfx.play("phaser")
             self.vx -= fx * 0.25; self.vy -= fy * 0.25      # a little kick
         for L in self.lasers:
             L.t += dt
@@ -180,6 +197,11 @@ class Game:
             step = LASER_SPEED * dt
             for i in range(4):
                 L.x += math.cos(L.a) * step / 4; L.y += math.sin(L.a) * step / 4
+                hit = self.alien_hit(L)
+                if hit:
+                    L.dead = 1e-6
+                    self.pop(hit)
+                    break
                 if self.world.blocked(L.x, L.y, L.z - 6, 0.02) or L.z < self.floor(L.x, L.y) + 4:
                     L.dead = 1e-6
                     self.sparks(L.x, L.y, L.z, L.col)
@@ -191,9 +213,14 @@ class Game:
             if p.kind == "dust":
                 d = math.exp(-2.2 * dt); p.vx *= d; p.vy *= d; p.vz = p.vz * d - 30 * dt
                 p.z = max(p.z, 0)
+            elif p.kind == "frag":
+                p.vz -= 260 * dt
+                if p.z < 0:
+                    p.z, p.vz = 0, -p.vz * 0.35; p.vx *= 0.6; p.vy *= 0.6
             else:
                 p.vz -= 300 * dt
         self.parts = [p for p in self.parts if p.age < p.life]
+        self.update_aliens(dt)
         # camera with look-ahead
         tx, ty = to_screen(self.x + self.vx * 0.35, self.y + self.vy * 0.35, self.z * 0.55)
         k = min(1.0, dt * 5)
@@ -220,6 +247,140 @@ class Game:
             self.parts.append(Particle(x, y, z, math.cos(a) * s, math.sin(a) * s, self.rng.uniform(40, 160),
                                        self.rng.uniform(0.15, 0.4), "spark", 2))
         self.parts.append(Particle(x, y, z, 0, 0, 0, 0.12, "flash", 1))
+
+    # ------------------------------------------------------------ aliens
+    def update_aliens(self, dt):
+        fi, fj = math.floor(self.x / CHUNK), math.floor(self.y / CHUNK)
+        # spawn: each chunk near Jetman releases its (deterministic) aliens once
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                k = (fi + di, fj + dj)
+                if k in self.spawned:
+                    continue
+                self.spawned.add(k)
+                for uid, x, y, var, seed in al.chunk_aliens(*k):
+                    if uid in self.killed or uid in self.aliens:
+                        continue
+                    if (x - self.x) ** 2 + (y - self.y) ** 2 < 9:      # never pop out on top of him
+                        continue
+                    if not self.world.blocked(x, y, 0, 0.35):
+                        self.aliens[uid] = al.Alien(uid, x, y, var, seed)
+        # despawn far away; let far chunks spawn again later so the population stays steady
+        for uid, a in list(self.aliens.items()):
+            if abs(a.x - self.x) > 2.6 * CHUNK or abs(a.y - self.y) > 2.6 * CHUNK:
+                del self.aliens[uid]
+        self.spawned = {k for k in self.spawned if abs(k[0] - fi) <= 2 and abs(k[1] - fj) <= 2}
+        ev = []
+        for a in self.aliens.values():
+            a.update(dt, self.world, self.x, self.y, ev)
+        for kind, a in ev:
+            self.alien_sound("bounce", a)
+            if (a.x - self.x) ** 2 + (a.y - self.y) ** 2 < 600:
+                for _ in range(5):
+                    ang = self.rng.uniform(0, math.tau); s = self.rng.uniform(0.5, 1.4)
+                    self.parts.append(Particle(a.x, a.y, a.floor + 1, math.cos(ang) * s, math.sin(ang) * s,
+                                               self.rng.uniform(2, 10), self.rng.uniform(0.3, 0.6), "dust",
+                                               self.rng.uniform(2, 3.5)))
+        # touching Jetman: hit flash and knockback (placeholder, no lives yet)
+        self.hit_t += dt
+        for a in self.aliens.values():
+            dx, dy = self.x - a.x, self.y - a.y
+            d = math.hypot(dx, dy)
+            body_z = a.z + 22
+            if d < 0.55 and self.z - 10 < body_z < self.z + 100 and a.hit_cool <= 0:
+                nx, ny = (dx / d, dy / d) if d > 1e-3 else (1.0, 0.0)
+                self.vx += nx * 5.0; self.vy += ny * 5.0
+                self.vz = max(self.vz, 170.0); self.z += 1
+                a.vx, a.vy = -nx * 2.5, -ny * 2.5
+                a.hit_cool = 0.8
+                self.hit_t = 0.0
+                self.sfx.play("hurt")
+                self.sparks(a.x + nx * 0.3, a.y + ny * 0.3, self.z + 40, (255, 255, 255))
+        # spin whirr on the nearest few aliens, attenuated by distance
+        sp = []
+        for a in self.aliens.values():
+            v = sx.falloff(math.hypot(a.x - self.x, a.y - self.y))
+            if v > 0:
+                sp.append((v * min(1.0, abs(a.spin_rate) / 6), self.alien_pan(a)))
+        sp.sort(key=lambda e: -e[0])
+        self.sfx.update(dt, self.thrusting, sp[:sx.SPIN_VOICES])
+        for s in self.splats:
+            s[3] += dt
+        self.splats = [s for s in self.splats if s[3] < 4.0]
+
+    def alien_pan(self, a):
+        sx_, _ = to_screen(a.x, a.y, 0)
+        jx, _ = to_screen(self.x, self.y, 0)
+        return sx.pan(W / 2 + (sx_ - jx), W)
+
+    def alien_sound(self, name, a):
+        self.sfx.play(name, sx.falloff(math.hypot(a.x - self.x, a.y - self.y)), self.alien_pan(a))
+
+    def alien_hit(self, L):
+        for a in self.aliens.values():
+            if (a.x - L.x) ** 2 + (a.y - L.y) ** 2 < 0.42 ** 2 and abs(L.z - (a.z + 24)) < 34:
+                return a
+        return None
+
+    def pop(self, a):
+        """Splat: spike fragments, goo, sparks and a flash."""
+        del self.aliens[a.uid]
+        self.alien_sound("pop", a)
+        self.killed.add(a.uid)
+        self.pops += 1
+        stalk, club, _ = al.VARIANTS[a.variant]
+        z = a.z + 24
+        for i in range(22):
+            ang = self.rng.uniform(0, math.tau); s = self.rng.uniform(1.5, 4.5)
+            p = Particle(a.x, a.y, z, math.cos(ang) * s, math.sin(ang) * s, self.rng.uniform(40, 220),
+                         self.rng.uniform(0.6, 1.1), "frag", 0)
+            p.size = (club if i % 2 else stalk, self.rng.uniform(0, math.tau), self.rng.uniform(-14, 14))
+            self.parts.append(p)
+        for _ in range(16):
+            ang = self.rng.uniform(0, math.tau); s = self.rng.uniform(1, 3)
+            self.parts.append(Particle(a.x, a.y, z, math.cos(ang) * s, math.sin(ang) * s, self.rng.uniform(30, 150),
+                                       self.rng.uniform(0.2, 0.45), "spark", 2))
+        self.parts.append(Particle(a.x, a.y, z, 0, 0, 0, 0.2, "flash", 1))
+        self.parts.append(Particle(a.x, a.y, z, 0, 0, 0, 0.3, "ring", club))
+        self.splats.append([a.x, a.y, club, 0.0, self.rng.random()])
+
+    def draw_alien_shadows(self, cx, cy):
+        for a in self.aliens.values():
+            gx, gy = to_screen(a.x, a.y, a.floor)
+            gx -= cx; gy -= cy
+            if not (-60 < gx < W + 60 and -60 < gy < H + 60):
+                continue
+            alt = max(0.0, a.z - a.floor)
+            k = 1.0 / (1.0 + alt / 70.0)
+            rx, ry = 6 + 16 * k, 3 + 8 * k
+            sh = pygame.Surface((int(rx * 2) + 6, int(ry * 2) + 6), pygame.SRCALPHA)
+            al_ = int(150 * (0.3 + 0.7 * k))
+            pygame.draw.ellipse(sh, (0, 0, 0, al_ // 2), sh.get_rect())
+            pygame.draw.ellipse(sh, (0, 0, 0, al_ // 2), sh.get_rect().inflate(-5, -3))
+            self.screen.blit(sh, (gx - rx - 3 - alt * 0.04, gy - ry - 3))
+
+    def draw_splats(self, cx, cy):
+        for x, y, col, age, seed in self.splats:
+            px, py = to_screen(x, y)
+            k = max(0.0, 1 - age / 4.0)
+            r = random.Random(int(seed * 1e6))
+            s = pygame.Surface((70, 36), pygame.SRCALPHA)
+            for _ in range(9):
+                ex, ey = r.uniform(-18, 18), r.uniform(-8, 8)
+                rr = r.uniform(4, 10)
+                pygame.draw.ellipse(s, col + (int(150 * k),), (35 + ex - rr, 18 + ey - rr / 2, rr * 2, rr))
+            self.screen.blit(s, (px - cx - 35, py - cy - 18))
+
+    def draw_alien(self, a, cx, cy):
+        px, py = to_screen(a.x, a.y, a.z)
+        px -= cx; py -= cy
+        if not (-60 < px < W + 60 and -90 < py < H + 40):
+            return None
+        sx, sy = a.squash()
+        surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES, sx, sy)
+        pos = (px - ax, py - ay + (2 if a.land_t < 0.15 else 0))
+        self.screen.blit(surf, pos)
+        return surf, pos
 
     # ------------------------------------------------------------ world streaming
     def visible_chunks(self, cx, cy, margin=140):
@@ -277,6 +438,8 @@ class Game:
             sc.blit(self.world.ground_surface(ci, cj), (sx - CW / 2 - cx, sy - cy))
         fl = self.floor()
         alt = max(0.0, self.z - fl)
+        self.draw_splats(cx, cy)
+        self.draw_alien_shadows(cx, cy)
         self.draw_shadow(cx, cy, fl, alt)
         # depth-sorted objects
         items = []
@@ -287,9 +450,12 @@ class Game:
         for p in self.parts:
             if p.kind == "dust":
                 items.append((p.x + p.y, 3, p))
+        for a in self.aliens.values():
+            items.append((a.x + a.y + 0.005, 4, a))
         items.sort(key=lambda t: t[0])
         jet_rect = None
         front = []
+        watched = []      # aliens drawn so far: (surf, pos, rect, rocks drawn over them)
         for _, kind, obj in items:
             if kind == 0:
                 px, py = to_screen(obj.x, obj.y)
@@ -302,11 +468,23 @@ class Game:
                 sc.blit(surf, pos)
                 if jet_rect is not None:
                     front.append((surf, pos))
+                if watched:
+                    rr = pygame.Rect(pos, surf.get_size())
+                    for w_ in watched:
+                        if rr.colliderect(w_[2]):
+                            w_[3].append((surf, pos))
             elif kind == 1:
                 jet_rect = self.draw_jetman(cx, cy, alt)
+            elif kind == 4:
+                d = self.draw_alien(obj, cx, cy)
+                if d:
+                    watched.append((d[0], d[1], pygame.Rect(d[1], d[0].get_size()), []))
             else:
                 self.draw_dust(obj, cx, cy)
         self.draw_silhouette(front, jet_rect)
+        for surf, pos, rect, fr in watched:
+            if fr:
+                self.silhouette(surf, pos, fr, (255, 235, 150, 80), (255, 240, 190))
         self.draw_lasers(cx, cy)
         for p in self.parts:
             if p.kind != "dust":
@@ -314,6 +492,18 @@ class Game:
                 k = 1 - p.age / p.life
                 if p.kind == "spark":
                     pygame.draw.circle(sc, (255, int(200 * k + 55), int(120 * k)), (px - cx, py - cy), 1.5 + k)
+                elif p.kind == "frag":
+                    col, ang, spin = p.size
+                    ang += spin * p.age
+                    x0, y0 = px - cx, py - cy
+                    x1, y1 = x0 + math.cos(ang) * 7, y0 + math.sin(ang) * 7
+                    pygame.draw.line(sc, (40, 40, 40), (x0, y0 + 1), (x1, y1 + 1), 3)
+                    pygame.draw.line(sc, col, (x0, y0), (x1, y1), 2)
+                    pygame.draw.circle(sc, col, (x1, y1), 3)
+                    pygame.draw.circle(sc, (255, 255, 255), (x1 - 1, y1 - 1), 1)
+                elif p.kind == "ring":
+                    r = 8 + 60 * (1 - k)
+                    pygame.draw.ellipse(sc, p.size, (px - cx - r, py - cy - r * 0.6, r * 2, r * 1.2), max(1, int(4 * k)))
                 else:
                     g = pygame.transform.smoothscale(self.glow, (int(70 * k + 10), int(70 * k + 10)))
                     sc.blit(g, (px - cx - g.get_width() / 2, py - cy - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
@@ -351,6 +541,10 @@ class Game:
         if self.thrusting and pack_behind:
             self.draw_flames(bx, by, noz)
         sc.blit(surf, (bx - ax, by - ay))
+        if self.hit_t < 0.35 and int(self.hit_t * 20) % 2 == 0:          # hit flash
+            fl_ = surf.copy()
+            fl_.fill((255, 70, 60, 0), special_flags=pygame.BLEND_RGBA_MAX)
+            sc.blit(fl_, (bx - ax, by - ay))
         if self.thrusting and not pack_behind:
             self.draw_flames(bx, by, noz)
         if self.fire_t < 0.06:
@@ -392,27 +586,24 @@ class Game:
         if jet_rect is None or not front:
             return
         jsurf, jpos = self.jet_draw
-        jmask = pygame.mask.from_surface(jsurf, 60)
-        hid = pygame.mask.Mask(jsurf.get_size())
-        for surf, pos in front:
-            r = pygame.Rect(pos, surf.get_size())
-            if not r.colliderect(jet_rect):
+        self.hidden = self.silhouette(jsurf, jpos, front, (150, 205, 255, 95), (200, 235, 255))
+
+    def silhouette(self, surf, spos, front, fill_col, edge_col, min_px=30):
+        jmask = pygame.mask.from_surface(surf, 60)
+        hid = pygame.mask.Mask(surf.get_size())
+        rect = pygame.Rect(spos, surf.get_size())
+        for rs, pos in front:
+            if not pygame.Rect(pos, rs.get_size()).colliderect(rect):
                 continue
-            rmask = pygame.mask.from_surface(surf, 200)
-            off = (int(pos[0] - jpos[0]), int(pos[1] - jpos[1]))
-            hid.draw(jmask.overlap_mask(rmask, off), (0, 0))
-        n = hid.count()
-        if n < 30:
-            return
-        self.hidden = True
-        fill = hid.to_surface(setcolor=(150, 205, 255, 95), unsetcolor=(0, 0, 0, 0))
-        self.screen.blit(fill, jpos)
-        edge = hid.outline()
-        jo = jmask.outline()
-        # draw Jetman's own outline, but only the stretches that are hidden
-        for x, y in jo[::1]:
+            off = (int(pos[0] - spos[0]), int(pos[1] - spos[1]))
+            hid.draw(jmask.overlap_mask(pygame.mask.from_surface(rs, 200), off), (0, 0))
+        if hid.count() < min_px:
+            return False
+        self.screen.blit(hid.to_surface(setcolor=fill_col, unsetcolor=(0, 0, 0, 0)), spos)
+        for x, y in jmask.outline():
             if hid.get_at((x, y)):
-                self.screen.set_at((int(x + jpos[0]), int(y + jpos[1])), (200, 235, 255))
+                self.screen.set_at((int(x + spos[0]), int(y + spos[1])), edge_col)
+        return True
 
     def draw_lasers(self, cx, cy):
         sc = self.screen
@@ -444,7 +635,7 @@ class Game:
         pygame.draw.line(sc, (90, 90, 90), (0, 34), (W, 34))
         alt = self.z - self.floor()
         txt = (f"ALTITUDE {int(alt):4d} m    HEADING {DIRS[self.facing()]:<10}    "
-               f"POSITION {self.x:8.1f}, {self.y:8.1f}    {self.fps:4.0f} FPS")
+               f"POSITION {self.x:8.1f}, {self.y:8.1f}    ALIENS {len(self.aliens):2d}   SWEPT {self.pops:3d}    {self.fps:4.0f} FPS")
         sc.blit(self.font.render(txt, True, (225, 225, 225)), (14, 9))
         pygame.draw.rect(sc, (0, 0, 0), (0, H - 34, W, 34))
         pygame.draw.line(sc, (90, 90, 90), (0, H - 34), (W, H - 34))
@@ -452,7 +643,7 @@ class Game:
         im = self.font.render(hint, True, (150, 150, 150))
         sc.blit(im, (W - im.get_width() - 14, H - 25))
         if self.t < 4:
-            sc.blit(self.big.render("LUNAR JETMAN  -  proof of concept", True, (235, 235, 235)), (14, 46))
+            sc.blit(self.big.render("MOON SWEEPER", True, (235, 235, 235)), (14, 46))
 
 
 CH_ = wd.CH
@@ -465,6 +656,9 @@ SCENES = {
     "fire": [(0.3, {"right": 1}), (0.62, {"fire": 1}), (0.016, {"fire": 1})],
     "behind": [(0.5, {"up": 1})],
     "far": [(0.6, {"jet": 1, "up": 1}), (0.25, {"up": 1, "fire": 1})],
+    "aliens": [(1.6, {}), (0.5, {"right": 1})],
+    "airborne": [(0.016, {})],
+    "pop": [(0.25, {}), (1.2, {"fire": 1})],
     "hover": [(0.45, {"jet": 1}), (0.4, {"jet": 1, "up": 1})],
 }
 
@@ -487,12 +681,47 @@ def place_behind_boulder(game):
             return
 
 
+def ring_of_aliens(game, n=7, rad=2.6, seed=3):
+    r = random.Random(seed)
+    for i in range(n):
+        a = i / n * math.tau + r.uniform(-.3, .3)
+        x, y = game.x + math.cos(a) * rad * r.uniform(0.7, 1.4), game.y + math.sin(a) * rad * r.uniform(0.7, 1.4)
+        if not game.world.blocked(x, y, 0, 0.35):
+            uid = ("shot", i)
+            game.aliens[uid] = al.Alien(uid, x, y, al.NAMES[i % len(al.NAMES)], r.randrange(1 << 30))
+
+
+def setup_scene(game, scene):
+    if scene in ("aliens", "airborne", "pop"):
+        game.update(1 / FPS, {})            # let the natural spawn happen first
+        for uid in list(game.aliens):       # keep the shot tidy: only staged aliens near him
+            if (game.aliens[uid].x - game.x) ** 2 + (game.aliens[uid].y - game.y) ** 2 < 49:
+                del game.aliens[uid]
+    if scene == "aliens":
+        ring_of_aliens(game)
+    elif scene == "airborne":
+        for i, (dx, dy, z, vz, var) in enumerate(((-1.4, 2.0, 104.0, 10.0, "crimson"), (2.6, 0.6, 50.0, -120.0, "violet"),
+                                                   (2.6, 2.4, 0.5, -60.0, "green"))):
+            a = al.Alien(("air", i), game.x + dx, game.y + dy, var, 11 + i)
+            a.z, a.vz, a.vx, a.vy = z, vz, 0.3, -0.2
+            game.aliens[("air", i)] = a
+    elif scene == "pop":
+        ang = game.a
+        for i, d in enumerate((3.0, 5.5)):
+            a = al.Alien(("pop", i), game.x + math.cos(ang) * d, game.y + math.sin(ang) * d, ("green", "violet")[i], 7 + i)
+            a.vx = a.vy = 0.0
+            a.z, a.vz = 8.0, 40.0
+            game.aliens[("pop", i)] = a
+
+
 def run_script(game, script):
     dt = 1 / FPS
     for secs, keys in script:
         for _ in range(max(1, int(round(secs * FPS)))):
             game.update(dt, keys)
             game.stream()
+    if script is SCENES["pop"]:
+        pass
     if script is SCENES["fire"]:
         while game.fire_t > 0:      # finish on the very frame a shot leaves the barrel
             game.update(dt, {"fire": 1})
@@ -528,16 +757,56 @@ def facings_sheet(screen, out):
     pygame.image.save(screen, out)
 
 
+def alien_sheet(screen, out):
+    """Close-up sheet: each variant at 2x, spin frames, and the squash-and-stretch cycle."""
+    spr = al.AlienSprites()
+    g = wd.World(wd.SEED, (8, 8))
+    for ci in range(-1, 2):
+        for cj in range(-1, 2):
+            sx, sy = to_screen(ci * CHUNK + 8, cj * CHUNK + 8)
+            screen.blit(g.ground_surface(ci, cj), (sx - CW / 2 + W / 2, sy - wd.CH / 2 + H / 2 - 120))
+    font = pygame.font.Font(None, 24)
+    lab = lambda t, x, y: screen.blit(font.render(t, True, (255, 255, 255), (0, 0, 0)), (x, y))
+    probe = al.Alien("p", 0, 0, "green", 1)
+    squash = []
+    for t in (0.5, 0.0, 0.04, 0.08, 0.12, 0.17, 0.22):     # stretched in the air, then the landing
+        probe.land_t = t; probe.vz = -230 if t == 0.5 else 0
+        squash.append(probe.squash())
+    lab("VARIANTS (2x)", 10, 44); lab("SPIN", 10, 250); lab("SQUASH + STRETCH ON LANDING", 10, 470)
+    for i, v in enumerate(al.NAMES):
+        s, ax, ay = spr.get(v, 0)
+        big = pygame.transform.smoothscale(s, (s.get_width() * 2, s.get_height() * 2))
+        x, y = 200 + i * 270, 225
+        sh = pygame.Surface((100, 44), pygame.SRCALPHA); pygame.draw.ellipse(sh, (0, 0, 0, 120), sh.get_rect())
+        screen.blit(sh, (x - 50, y - 22)); screen.blit(big, (x - ax * 2, y - ay * 2))
+        lab(v.upper(), x - 30, 40)
+        for f in range(0, al.SPIN_FRAMES, 2):
+            s, ax, ay = spr.get(v, f)
+            screen.blit(s, (85 + i * 270 + f * 20 - ax, 360 + (f // 2 % 2) * 48 - ay))
+    for j, (sx, sy) in enumerate(squash):
+        s, ax, ay = spr.get(al.NAMES[j % 4], 3, sx, sy)
+        x, y = 140 + j * 160, 650
+        sh = pygame.Surface((60, 26), pygame.SRCALPHA); pygame.draw.ellipse(sh, (0, 0, 0, 120), sh.get_rect())
+        screen.blit(sh, (x - 30, y - 13)); screen.blit(s, (x - ax, y - ay + 50 * (j == 0) * -1))
+        lab(f"{sx:.2f}x{sy:.2f}", x - 35, 670)
+    pygame.image.save(screen, out)
+
+
 def main():
     pygame.init()
-    headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings"))
+    headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens"))
     if headless or "--windowed" in sys.argv:
         screen = pygame.display.set_mode((W, H))
     else:
         screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN | pygame.SCALED)
-    pygame.display.set_caption("Lunar Jetman - proof of concept")
+    pygame.display.set_caption("Moon Sweeper")
     outdir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lunar_poc"))
     os.makedirs(outdir, exist_ok=True)
+    if "--aliens" in sys.argv:
+        name = sys.argv[sys.argv.index("--aliens") + 1]
+        alien_sheet(screen, os.path.join(outdir, name + ".png"))
+        print("saved", name)
+        return
     if "--facings" in sys.argv:
         name = sys.argv[sys.argv.index("--facings") + 1]
         facings_sheet(screen, os.path.join(outdir, name + ".png"))
@@ -551,7 +820,19 @@ def main():
         game = Game(screen, start=start)
         if scene == "behind":
             place_behind_boulder(game)
-        run_script(game, SCENES[scene])
+        while game.jet_jobs:
+            game.collect_frames(); time.sleep(0.02)
+        setup_scene(game, scene)
+        if scene == "pop":
+            dt = 1 / FPS
+            n = 0
+            while game.pops == 0 and n < 200:
+                game.update(dt, {"fire": int(n > 10)}); n += 1
+            for _ in range(5):
+                game.update(dt, {})
+            game.t = 10; game.draw()
+        else:
+            run_script(game, SCENES[scene])
         pygame.image.save(screen, os.path.join(outdir, name + ".png"))
         print("saved", name, f"at {game.x:.1f},{game.y:.1f} alt {game.z:.0f} hidden={game.hidden}")
         return

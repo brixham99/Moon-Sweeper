@@ -1,4 +1,4 @@
-"""Infinite, deterministic lunar surface for Lunar Jetman.
+"""Infinite, deterministic lunar surface for Moon Sweeper.
 
 The world is split into CHUNK x CHUNK tile chunks. Everything about a chunk
 (craters, boulders, ridges, the albedo noise) comes from a hash of its
