@@ -21,6 +21,7 @@ import numpy as np
 import pygame
 
 import rover as rv
+import base as bs
 
 TW, TH = 64, 32            # strict 2:1 isometric tile
 HW, HH = TW // 2, TH // 2
@@ -199,12 +200,22 @@ class Rock:
         self.key = seed
 
 
+BEACON_GAP = 26.0           # beacons stand on a regular grid, every 26 tiles (at most two on screen), for ever
+
+
+def beacon_clear(x, y, d):
+    """True if (x, y) is at least d tiles from the nearest beacon grid point."""
+    gx = (math.floor(x / BEACON_GAP) + 0.5) * BEACON_GAP; gy = (math.floor(y / BEACON_GAP) + 0.5) * BEACON_GAP
+    return (x - gx) ** 2 + (y - gy) ** 2 > d * d
+
+
 class World:
     def __init__(self, seed=SEED, start=(0.5, 0.5)):
         global SEED
         SEED = seed
         self.start = start
         self.rover = (start[0] + 0.4, start[1] - 4.8)    # parked just behind the landing spot, nose south-east
+        self.base = (start[0] + 27.0, start[1] + 19.0)  # the Alien Missile Base, ~33 tiles away to the south
         self.raw = {}        # (ci, cj) -> (craters, rocks) born in that chunk
         self.rocks = {}      # (ci, cj) -> rocks sitting in that chunk
         self.ground = {}     # (ci, cj) -> Surface
@@ -263,9 +274,12 @@ class World:
                     rock(x + r.uniform(-.9, .9), y + r.uniform(-.9, .9), r.uniform(0.25, 0.6))
         sx, sy = self.start                        # keep the landing site clear
         rx, ry = self.rover
-        rocks = [k for k in rocks if (k.x - sx) ** 2 + (k.y - sy) ** 2 > 7 and not rv.in_footprint(rx, ry, k.x, k.y, 1.6)]
+        bx, by = self.base
+        rocks = [k for k in rocks if (k.x - sx) ** 2 + (k.y - sy) ** 2 > 7 and not rv.in_footprint(rx, ry, k.x, k.y, 1.6)
+                 and not bs.in_footprint(bx, by, k.x, k.y, 1.6) and beacon_clear(k.x, k.y, 0.7 + k.size * 0.5)]
         craters = [c for c in craters if (c[0] - sx) ** 2 + (c[1] - sy) ** 2 > (c[2] + 2.5) ** 2
-                   and (c[0] - rx) ** 2 + (c[1] - ry) ** 2 > (c[2] + 3.2) ** 2]
+                   and (c[0] - rx) ** 2 + (c[1] - ry) ** 2 > (c[2] + 3.2) ** 2
+                   and (c[0] - bx) ** 2 + (c[1] - by) ** 2 > (c[2] + 5.5) ** 2]
         craters.sort(key=lambda c: -c[2])          # big (old) first; younger, smaller ones carve into them
         self.raw[k] = (craters, rocks)
         return self.raw[k]
@@ -286,6 +300,8 @@ class World:
     def blocked(self, x, y, z, rad=0.3):
         if z < rv.height_at(self.rover[0], self.rover[1], x, y, rad) * 0.95:
             return True
+        if z < bs.height_at(self.base[0], self.base[1], x, y, rad) * 0.95:
+            return True
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
@@ -294,9 +310,21 @@ class World:
                         return True
         return False
 
+    def beacons_in(self, x0, y0, x1, y1):
+        """Beacon positions in a tile rectangle (none on the rover or the base)."""
+        out = []
+        g = BEACON_GAP
+        for i in range(math.floor(x0 / g), math.floor(x1 / g) + 1):
+            for j in range(math.floor(y0 / g), math.floor(y1 / g) + 1):
+                x, y = (i + 0.5) * g, (j + 0.5) * g
+                if rv.in_footprint(*self.rover, x, y, 0.8) or bs.in_footprint(*self.base, x, y, 0.8):
+                    continue
+                out.append((x, y))
+        return out
+
     def floor_at(self, x, y):
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
-        f = rv.height_at(self.rover[0], self.rover[1], x, y)
+        f = max(rv.height_at(self.rover[0], self.rover[1], x, y), bs.height_at(self.base[0], self.base[1], x, y))
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
                 for rk in self.chunk_rocks(ci + di, cj + dj):

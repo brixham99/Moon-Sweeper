@@ -29,6 +29,7 @@ from world import CHUNK, CW, HH, HW, TH, TW, to_screen
 import jetman as jm
 import aliens as al
 import rover as rv
+import base as bs
 import sfx as sx
 from jetman import JetmanSprites
 
@@ -40,7 +41,7 @@ def sprite_cache_path():
     import hashlib
     here = os.path.dirname(os.path.abspath(__file__))
     h = hashlib.sha1()
-    for fn in ("jetman.py", "aliens.py", "rover.py"):
+    for fn in ("jetman.py", "aliens.py", "rover.py", "base.py"):
         with open(os.path.join(here, fn), "rb") as f:
             h.update(f.read())
     return os.path.join(os.path.expanduser("~"), ".cache", "moon-sweeper", f"sprites-{h.hexdigest()[:12]}.pkl")
@@ -51,7 +52,7 @@ def load_sprite_cache(path):
     try:
         with open(path, "rb") as f:
             res = pickle.load(f)
-        return res if len(res) == len(jm.all_keys()) + len(al.all_keys()) + 1 else None
+        return res if len(res) == len(jm.all_keys()) + len(al.all_keys()) + 1 + bs.FRAMES else None
     except Exception:
         return None
 
@@ -85,6 +86,7 @@ LASER_SPEED = 30.0
 LASER_COLS = [(255, 60, 80), (255, 210, 60), (90, 255, 120), (80, 200, 255), (230, 90, 255), (255, 255, 255)]
 DIRS = ["SOUTH-EAST", "SOUTH", "SOUTH-WEST", "WEST", "NORTH-WEST", "NORTH", "NORTH-EAST", "EAST"]
 START = (8.5, 8.5)
+BEACON_CORRIDOR = 8.0     # tiles either side of the Jetman-to-base line that turn a beacon red
 
 
 class Laser:
@@ -133,6 +135,9 @@ class Game:
         # thread, then kept in a small disk cache so later start-ups are quick
         self.alien_spr = al.AlienSprites()
         self.rover_spr = None
+        self.base_spr = bs.BaseSprites()
+        self.beacon_spr = self._beacon_sprites()
+        self.n_red = 0
         self.frame_res, self.cache_path = [], sprite_cache_path()
         cached = load_sprite_cache(self.cache_path)
         if cached:
@@ -143,6 +148,7 @@ class Game:
             self.jet_jobs = [self.world.sprite_pool.submit(jm.frame_bytes, k) for k in jm.all_keys()]
             self.jet_jobs += [self.world.sprite_pool.submit(al.frame_bytes, k) for k in al.all_keys()]
             self.jet_jobs.insert(0, self.world.sprite_pool.submit(rv.frame_bytes))
+            self.jet_jobs[1:1] = [self.world.sprite_pool.submit(bs.frame_bytes, k) for k in bs.all_keys()]
         self.n_frames = len(self.jet_jobs)
         self.aliens = {}            # uid -> Alien
         self.spawned = set()        # chunks whose aliens are out
@@ -171,10 +177,46 @@ class Game:
     def accept_frame(self, res):
         if res[0] == "rover":
             self.rover_spr = rv.make_sprite(res)
+        elif isinstance(res[0], str) and res[0].startswith("base:"):
+            self.base_spr.accept(res)
         elif isinstance(res[0][0], str):
             self.alien_spr.accept(res)
         else:
             jm.accept(self.jet.cache, res)
+
+    @staticmethod
+    def _beacon_sprites():
+        """A beacon: footing plate, slim metal post, gold collar, lamp; plus red/green glows."""
+        post = pygame.Surface((24, 56), pygame.SRCALPHA)
+        ax, ay = 12, 48                                   # anchor: foot of the post on the ground
+        pygame.draw.polygon(post, (18, 18, 22), [(ax - 9, ay), (ax, ay - 4.5), (ax + 9, ay), (ax, ay + 4.5)])
+        pygame.draw.polygon(post, (92, 94, 100), [(ax - 8, ay), (ax, ay - 4), (ax + 8, ay), (ax, ay + 4)])
+        pygame.draw.polygon(post, (64, 66, 72), [(ax - 8, ay), (ax, ay + 4), (ax, ay + 6), (ax - 8, ay + 2)])
+        pygame.draw.polygon(post, (120, 122, 128), [(ax + 8, ay), (ax, ay + 4), (ax, ay + 6), (ax + 8, ay + 2)])
+        pygame.draw.rect(post, (18, 18, 22), (ax - 3, ay - 36, 6, 37))
+        pygame.draw.rect(post, (150, 154, 160), (ax - 2, ay - 35, 2, 35))
+        pygame.draw.rect(post, (100, 104, 110), (ax, ay - 35, 2, 35))
+        pygame.draw.rect(post, (18, 18, 22), (ax - 5, ay - 39, 10, 6))
+        pygame.draw.rect(post, (200, 160, 56), (ax - 4, ay - 38, 4, 4))
+        pygame.draw.rect(post, (150, 116, 36), (ax, ay - 38, 4, 4))
+        out = {}
+        for name, lamp, hi in (("red", (230, 40, 34), (255, 190, 170)), ("green", (40, 220, 70), (200, 255, 200))):
+            s = post.copy()
+            pygame.draw.circle(s, (18, 18, 22), (ax, ay - 43), 6)
+            pygame.draw.circle(s, lamp, (ax, ay - 43), 5)
+            pygame.draw.circle(s, hi, (ax - 1, ay - 44), 2)
+            if pygame.display.get_surface():
+                s = s.convert_alpha()
+            glow = pygame.Surface((72, 72), pygame.SRCALPHA)
+            for r in range(36, 0, -1):
+                k = 1.5 * (1 - r / 36) ** 2.0
+                pygame.draw.circle(glow, tuple(min(255, int(c * k)) for c in lamp), (36, 36), r)
+            pool = pygame.Surface((64, 32), pygame.SRCALPHA)       # soft light pooled on the ground, 2:1
+            for r in range(32, 0, -1):
+                k = 0.5 * (1 - r / 32) ** 1.6
+                pygame.draw.ellipse(pool, tuple(int(c * k) for c in lamp), (32 - r, 16 - r / 2, r * 2, r))
+            out[name] = (s, ax, ay, glow, pool)
+        return out
 
     @staticmethod
     def _glow_sprite():
@@ -554,6 +596,17 @@ class Game:
             sh, sx_, sy_ = self.rover_spr[3:]
             px, py = to_screen(*self.world.rover)
             sc.blit(sh, (px - cx - sx_, py - cy - sy_))
+        bx, by = self.world.base
+        BK = bx + by
+        if self.base_spr.shadow:
+            sh, sx_, sy_ = self.base_spr.shadow
+            px, py = to_screen(bx, by)
+            sc.blit(sh, (px - cx - sx_, py - cy - sy_))
+        beacons = self.visible_beacons(cx, cy)
+        for x, y, red in beacons:                     # light pooled on the ground round each lamp
+            pool = self.beacon_spr["red" if red else "green"][4]
+            px, py = to_screen(x, y)
+            sc.blit(pool, (px - cx - 32, py - cy - 16), special_flags=pygame.BLEND_ADD)
         self.draw_alien_shadows(cx, cy)
         self.draw_shadow(cx, cy, fl, alt)
         # depth-sorted objects
@@ -564,7 +617,9 @@ class Game:
         def key(x, y, own, r=0.3):
             # iso box rule against the rover, so its long diagonal body sorts right
             rel = rv.relation(rx, ry, x, y, r)
-            return max(own, RK + 0.01) if rel > 0 else (min(own, RK - 0.01) if rel < 0 else own)
+            own = max(own, RK + 0.01) if rel > 0 else (min(own, RK - 0.01) if rel < 0 else own)
+            rel = bs.relation(bx, by, x, y, r)
+            return max(own, BK + 0.01) if rel > 0 else (min(own, BK - 0.01) if rel < 0 else own)
         for (ci, cj) in self.visible_chunks(cx, cy, 260):
             for rk in self.world.chunk_rocks(ci, cj):
                 items.append((key(rk.x, rk.y, rk.x + rk.y, rk.size * 0.5), 0, rk))
@@ -572,9 +627,16 @@ class Game:
         top = rv.height_at(rx, ry, self.x, self.y, 0.3)
         if top > 0 and self.z >= top * 0.9:
             jd = max(jd, RK + 0.02)                   # on (or just over) the rover: draw him on top
+        top = bs.height_at(bx, by, self.x, self.y, 0.3)
+        if top > 0 and self.z >= top * 0.9:
+            jd = max(jd, BK + 0.02)
         items.append((jd, 1, None))
         if self.rover_spr:
             items.append((RK, 5, None))
+        if self.base_spr.ready():
+            items.append((BK, 6, None))
+        for b in beacons:
+            items.append((key(b[0], b[1], b[0] + b[1], 0.15), 7, b))
         for p in self.parts:
             if p.kind == "dust":
                 items.append((key(p.x, p.y, p.x + p.y, 0.1), 3, p))
@@ -582,6 +644,8 @@ class Game:
             ak = key(a.x, a.y, a.x + a.y + 0.005, 0.28)
             if a.z >= rv.height_at(rx, ry, a.x, a.y, 0.28) * 0.9 and rv.in_footprint(rx, ry, a.x, a.y, 0.28):
                 ak = max(ak, RK + 0.015)
+            if a.z >= bs.height_at(bx, by, a.x, a.y, 0.28) * 0.9 and bs.in_footprint(bx, by, a.x, a.y, 0.28):
+                ak = max(ak, BK + 0.015)
             items.append((ak, 4, a))
         items.sort(key=lambda t: t[0])
         jet_rect = None
@@ -616,6 +680,26 @@ class Game:
                     for w_ in watched:
                         if rr.colliderect(w_[2]):
                             w_[3].append((surf, pos))
+            elif kind == 6:
+                surf, ox, oy = self.base_spr.get(self.t)
+                px, py = to_screen(bx, by)
+                pos = (px - cx - ox, py - cy - oy)
+                if pos[0] < W and pos[0] + surf.get_width() > 0 and pos[1] < H and pos[1] + surf.get_height() > 0:
+                    sc.blit(surf, pos)
+                    if jet_rect is not None:
+                        front.append((surf, pos))
+                    rr = pygame.Rect(pos, surf.get_size())
+                    for w_ in watched:
+                        if rr.colliderect(w_[2]):
+                            w_[3].append((surf, pos))
+            elif kind == 7:
+                x, y, red = obj
+                s, ax, ay, glow, _ = self.beacon_spr["red" if red else "green"]
+                px, py = to_screen(x, y)
+                sc.blit(s, (px - cx - ax, py - cy - ay))
+                pulse = 0.8 + 0.2 * math.sin(self.t * 4.0 + x * 0.7 + y * 1.3)
+                g = glow if pulse > 0.9 else self.beacon_dim(red)
+                sc.blit(g, (px - cx - 36, py - cy - ay + 5 - 36), special_flags=pygame.BLEND_ADD)
             elif kind == 1:
                 jet_rect = self.draw_jetman(cx, cy, alt)
             elif kind == 4:
@@ -651,6 +735,36 @@ class Game:
                     g = pygame.transform.smoothscale(self.glow, (int(70 * k + 10), int(70 * k + 10)))
                     sc.blit(g, (px - cx - g.get_width() / 2, py - cy - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
         self.hud()
+
+    def beacon_dim(self, red):
+        k = "red_dim" if red else "green_dim"
+        if k not in self.beacon_spr:
+            g = self.beacon_spr["red" if red else "green"][3].copy()
+            g.fill((170, 170, 170), special_flags=pygame.BLEND_MULT)
+            self.beacon_spr[k] = g
+        return self.beacon_spr[k]
+
+    def visible_beacons(self, cx, cy):
+        """Beacons on screen, each (x, y, red). Red if it stands in the corridor from Jetman to the base."""
+        us, vs = [], []
+        for sx, sy in ((-60, -60), (W + 60, -60), (-60, H + 80), (W + 60, H + 80)):
+            X, Y = sx + cx, sy + cy
+            us.append((Y / HH + X / HW) / 2); vs.append((Y / HH - X / HW) / 2)
+        bx, by = self.world.base
+        dx, dy = bx - self.x, by - self.y
+        L2 = dx * dx + dy * dy or 1e-9
+        out = []
+        n_red = 0
+        for x, y in self.world.beacons_in(min(us), min(vs), max(us), max(vs)):
+            t = ((x - self.x) * dx + (y - self.y) * dy) / L2
+            red = False
+            if 0.0 < t < 1.0:
+                ex, ey = self.x + dx * t - x, self.y + dy * t - y
+                red = ex * ex + ey * ey < BEACON_CORRIDOR ** 2
+            n_red += red
+            out.append((x, y, red))
+        self.n_red = n_red
+        return out
 
     def draw_shadow(self, cx, cy, fl, alt):
         gx, gy = to_screen(self.x, self.y, fl)
@@ -805,6 +919,12 @@ SCENES = {
     "rover_behind": [(0.35, {"up": 1}), (0.05, {})],
     "rover_front": [(0.3, {"up": 1}), (0.05, {})],
     "pop": [(0.25, {}), (1.2, {"fire": 1})],
+    "base": [(0.05, {})],
+    "base_far": [(0.05, {})],
+    "base_on": [(0.05, {})],
+    "beacons": [(0.05, {})],
+    "beacons_wide": [(0.05, {})],
+    "beacons_start": [(0.05, {})],
     "hover": [(0.45, {"jet": 1}), (0.4, {"jet": 1, "up": 1})],
 }
 
@@ -838,6 +958,21 @@ def ring_of_aliens(game, n=7, rad=2.6, seed=3):
 
 
 def setup_scene(game, scene):
+    if scene in ("base", "base_far", "base_on", "beacons", "beacons_wide", "beacons_start"):
+        bx, by = game.world.base
+        pos = {"base": (bx + 4.6, by + 1.2, -2.6), "base_far": (bx - 7.0, by + 6.0, 0.0),
+               "base_on": (bx + 1.6, by - 1.0, 2.4), "beacons": (bx - 14.0, by - 7.5, 0.5), "beacons_wide": (bx - 11.5, by + 12.0, -0.8), "beacons_start": (bx - 24.0, by - 19.0, 0.6)}[scene]
+        game.x, game.y, game.a = pos
+        if scene == "base_on":
+            game.z = bs.PAD_Z
+        cx = (game.x + bx) / 2 if scene.startswith("beacons") else bx + 1.5
+        cy = (game.y + by) / 2 if scene.startswith("beacons") else by + 1.0
+        if scene == "beacons_start":
+            cx, cy = game.x + 4.0, game.y + 3.0
+        game.cam = list(to_screen(cx, cy)); game.shot_cam = list(game.cam)
+        game.wait_ready()
+        game.update(1 / FPS, {})
+        game.aliens.clear(); game.spawned.update((i, j) for i in range(-20, 20) for j in range(-20, 20))
     if scene in ("rover", "rover_behind", "rover_front"):
         game.update(1 / FPS, {})
         for uid in list(game.aliens):       # a tidy shot of the rover
@@ -884,6 +1019,11 @@ def run_script(game, script):
         while game.fire_t > 0:      # finish on the very frame a shot leaves the barrel
             game.update(dt, {"fire": 1})
     game.t = 10
+    if getattr(game, "shot_cam", None):
+        game.cam = list(game.shot_cam)
+        game.aliens.clear()
+        for _ in range(30):
+            game.stream(); time.sleep(0.03)
     game.draw()
 
 
