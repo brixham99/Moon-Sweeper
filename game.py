@@ -22,6 +22,7 @@ if any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     os.environ["SDL_AUDIODRIVER"] = "dummy"
 
+import numpy as np
 import pygame
 
 import world as wd
@@ -443,20 +444,37 @@ class Game:
         self.parts.append(Particle(a.x, a.y, z, 0, 0, 0, 0.3, "ring", club))
         self.splats.append([a.x, a.y, club, 0.0, self.rng.random()])
 
-    def draw_alien_shadows(self, cx, cy):
+    def shadow_at(self, x, y, z, fl=None):
+        """Where a point's sun shadow lands: (x, y, floor) on whatever is under it."""
+        if fl is None:
+            fl = self.world.floor_at(x, y)
+        if z - fl < 0.5:
+            return x, y, fl                           # standing: the shadow starts at his feet
+        for _ in range(2):
+            d = max(0.0, z - fl)
+            sx, sy = x - SHADOW_W * d, y + SHADOW_W * d
+            fl = self.world.floor_at(sx, sy)
+        return sx, sy, min(fl, z)
+
+    def queue_shadow(self, surf, ax, ay, x, y, z, raised, fl=None):
+        """Shadow on bare ground: draw now. On a raised top: return it for the depth sort."""
+        sh, ox, oy = cast_shadow(surf, ax, ay)
+        sx, sy, fl = self.shadow_at(x, y, z, fl)
+        px, py = to_screen(sx, sy, fl)
+        item = (sh, px - ox, py - oy)
+        if fl > 0.5:
+            raised.append((sx, sy, fl, item))
+        else:
+            self.screen.blit(sh, (item[1] - self.cam_draw[0], item[2] - self.cam_draw[1]))
+
+    def draw_alien_shadows(self, cx, cy, raised):
         for a in self.aliens.values():
             gx, gy = to_screen(a.x, a.y, a.floor)
             gx -= cx; gy -= cy
-            if not (-60 < gx < W + 60 and -60 < gy < H + 60):
+            if not (-120 - (a.z - a.floor) * SHADOW_K < gx < W + 60 and -60 < gy < H + 60):
                 continue
-            alt = max(0.0, a.z - a.floor)
-            k = 1.0 / (1.0 + alt / 70.0)
-            rx, ry = 6 + 16 * k, 3 + 8 * k
-            sh = pygame.Surface((int(rx * 2) + 6, int(ry * 2) + 6), pygame.SRCALPHA)
-            al_ = int(150 * (0.3 + 0.7 * k))
-            pygame.draw.ellipse(sh, (0, 0, 0, al_ // 2), sh.get_rect())
-            pygame.draw.ellipse(sh, (0, 0, 0, al_ // 2), sh.get_rect().inflate(-5, -3))
-            self.screen.blit(sh, (gx - rx - 3 - alt * 0.04, gy - ry - 3))
+            surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES)
+            self.queue_shadow(surf, ax, ay, a.x, a.y, a.z, raised, a.floor)
 
     def draw_splats(self, cx, cy):
         for x, y, col, age, seed in self.splats:
@@ -607,8 +625,10 @@ class Game:
             pool = self.beacon_spr["red" if red else "green"][4]
             px, py = to_screen(x, y)
             sc.blit(pool, (px - cx - 32, py - cy - 16), special_flags=pygame.BLEND_ADD)
-        self.draw_alien_shadows(cx, cy)
-        self.draw_shadow(cx, cy, fl, alt)
+        self.cam_draw = (cx, cy)
+        raised = []                                   # shadows falling on the rover/base/boulder tops
+        self.draw_alien_shadows(cx, cy, raised)
+        self.draw_shadow(cx, cy, fl, alt, raised)
         # depth-sorted objects
         items = []
         rx, ry = self.world.rover
@@ -647,6 +667,19 @@ class Game:
             if a.z >= bs.height_at(bx, by, a.x, a.y, 0.28) * 0.9 and bs.in_footprint(bx, by, a.x, a.y, 0.28):
                 ak = max(ak, BK + 0.015)
             items.append((ak, 4, a))
+        for sx_, sy_, sfl, it in raised:
+            k_ = key(sx_, sy_, sx_ + sy_, 0.2)
+            if rv.height_at(rx, ry, sx_, sy_) > 0.5:
+                k_ = max(k_, RK + 0.005)
+            if bs.height_at(bx, by, sx_, sy_) > 0.5:
+                k_ = max(k_, BK + 0.005)
+            ci_, cj_ = int(sx_ // CHUNK), int(sy_ // CHUNK)
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    for rk in self.world.chunk_rocks(ci_ + di, cj_ + dj):
+                        if (rk.x - sx_) ** 2 + (rk.y - sy_) ** 2 < (rk.size * 0.42) ** 2:
+                            k_ = max(k_, key(rk.x, rk.y, rk.x + rk.y, rk.size * 0.5) + 0.005)
+            items.append((k_, 8, it))               # just after the top it lies on
         items.sort(key=lambda t: t[0])
         jet_rect = None
         front = []
@@ -700,6 +733,8 @@ class Game:
                 pulse = 0.8 + 0.2 * math.sin(self.t * 4.0 + x * 0.7 + y * 1.3)
                 g = glow if pulse > 0.9 else self.beacon_dim(red)
                 sc.blit(g, (px - cx - 36, py - cy - ay + 5 - 36), special_flags=pygame.BLEND_ADD)
+            elif kind == 8:
+                sc.blit(obj[0], (obj[1] - cx, obj[2] - cy))
             elif kind == 1:
                 jet_rect = self.draw_jetman(cx, cy, alt)
             elif kind == 4:
@@ -766,16 +801,9 @@ class Game:
         self.n_red = n_red
         return out
 
-    def draw_shadow(self, cx, cy, fl, alt):
-        gx, gy = to_screen(self.x, self.y, fl)
-        k = 1.0 / (1.0 + alt / 160.0)
-        fade = max(0.0, 1 - alt / 700)
-        rx, ry = 10 + 22 * k, 5 + 11 * k
-        sh = pygame.Surface((int(rx * 2) + 8, int(ry * 2) + 8), pygame.SRCALPHA)
-        a = int(170 * (0.35 + 0.65 * k) * (0.4 + 0.6 * fade))
-        pygame.draw.ellipse(sh, (0, 0, 0, a // 2), sh.get_rect())               # soft edge
-        pygame.draw.ellipse(sh, (0, 0, 0, a // 2), sh.get_rect().inflate(-6, -4))
-        self.screen.blit(sh, (gx - cx - rx - 4 - alt * 0.03, gy - cy - ry - 4))
+    def draw_shadow(self, cx, cy, fl, alt, raised):
+        surf, ax, ay = self.jet_frame(alt)[:3]
+        self.queue_shadow(surf, ax, ay, self.x, self.y, self.z, raised, fl)
 
     def jet_frame(self, alt, recoil=None):
         f = self.facing()
@@ -905,6 +933,56 @@ class Game:
 
 CH_ = wd.CH
 
+
+
+# ---------------------------------------------------------------- cast shadows
+# Same sun as the rover, base and terrain: east and above. A point h px up
+# lands on the ground SHADOW_K px further west on screen (rover.shadow_sprite).
+SHADOW_W = 0.55 * rv.LIGHT[0] / rv.LIGHT[2] / 32.0     # world tiles of shift per px of height (-x, +y)
+SHADOW_K = 2 * SHADOW_W * 32.0                          # screen px left per px of height
+_SHADOW_CACHE = {}
+
+
+def cast_shadow(surf, ax, ay):
+    """Ground shadow of a sprite (anchor = ground contact) in the scene's style:
+    each row of the silhouette is a horizontal slice, laid flat on the ground as a
+    2:1 ellipse and pushed west by its height. Flat 0,0,0,120 with a short blur,
+    like the rover and base shadows. Returns (surface, anchor x, anchor y)."""
+    hit = _SHADOW_CACHE.get(id(surf))
+    if hit and hit[0] is surf:
+        return hit[1]
+    a = pygame.surfarray.pixels_alpha(surf)
+    cols = a > 100
+    del a
+    w, h = cols.shape
+    ell = []
+    for y in range(0, h, 2):
+        xs = np.nonzero(cols[:, y])[0]
+        if len(xs) == 0:
+            continue
+        hh = max(0.0, ay - y)
+        r = (xs[-1] - xs[0] + 1) / 2 * 0.8
+        ell.append((xs[0] + r / 0.8 - ax - hh * SHADOW_K, r))
+    if not ell:
+        res = (pygame.Surface((1, 1), pygame.SRCALPHA), 0, 0)
+    else:
+        x0 = min(c - r for c, r in ell) - 6; x1 = max(c + r for c, r in ell) + 6
+        ry = max(r for _, r in ell) / 2 + 6
+        S = 2
+        W_, H_ = int(x1 - x0) + 1, int(2 * ry) + 1
+        big = pygame.Surface((W_ * S, H_ * S), pygame.SRCALPHA)
+        for c, r in ell:
+            pygame.draw.ellipse(big, (0, 0, 0, 255), ((c - r - x0) * S, (ry - r / 2) * S, max(2, 2 * r * S), max(2, r * S)))
+        m = pygame.surfarray.pixels_alpha(big)
+        m[m > 0] = 120
+        del m
+        small = pygame.transform.smoothscale(big, (max(1, W_ // 2), max(1, H_ // 2)))
+        s = pygame.transform.smoothscale(small, (W_, H_))
+        if pygame.display.get_surface():
+            s = s.convert_alpha()
+        res = (s, -x0, ry)
+    _SHADOW_CACHE[id(surf)] = (surf, res)
+    return res
 
 # ---------------------------------------------------------------- scripted scenes for --shot
 SCENES = {
