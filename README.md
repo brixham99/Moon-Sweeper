@@ -23,6 +23,7 @@ Left/Right turn · Up forward · Down back up · Space jetpack · Ctrl or Z fire
 - `jetman.py` – Jetman as a small 3D rig of lit spheres/capsules rendered to 8 true
   facings (idle, 8-frame walk, 5 flight lean levels, recoil variants).
 - `game.py` – physics, effects, depth sort, silhouette, HUD, shots and bench.
+- `assets/esa_logo.png` – the ESA emblem, warped onto the rover's side at sprite-build time (keep it alongside the code).
 
 ## Aliens (`aliens.py`)
 Spiky, coronavirus-like aliens bounce about in low gravity, drift towards Jetman when he is near and bounce off boulders. They spawn per chunk (deterministic) and despawn far away. Sprites are prerendered sphere impostors (lit from the east) in four spike colours with a slow spin; landing squash and airborne stretch are applied at draw time. Shoot them to pop them; touching one knocks Jetman back. `python3 game.py --aliens NAME` saves a sprite sheet.

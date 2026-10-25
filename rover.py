@@ -9,6 +9,7 @@ Units: x, y in tiles; z in screen pixels (32 px of height = 1 tile, for
 normals, shading and depth only).
 """
 import math
+import os
 import numpy as np
 import pygame
 
@@ -129,6 +130,75 @@ def disc(m, c, u, v, r, col, out, spec=0.4, n=12, rz=None):
     m.face(facing(pts, out), col, spec, 1.5)
 
 
+# ESA emblem: the genuine logo (assets/esa_logo.png, transparent outside the disc), painted onto the
+# visible (+y) cabin flank after the model is drawn, through the flank's exact 2:1 isometric affine.
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "esa_logo.png")
+LOGO_S, LOGO_Z, LOGO_R = 0.41, 115.0, 24.0        # centre along the flank (0..1), height (px), radius (px)
+
+
+def _logo_affine(ax, ay):
+    """Sprite-pixel position of emblem coords (u, w), each -1..1 (u along the body, w up): q = o + u*a + w*b."""
+    x0, x1 = RINGS[1][0], RINGS[2][0]
+    Uc = (x0 + (x1 - x0) * LOGO_S) * ZT
+    def scr(u, w):
+        p = flank(1, ((Uc + u * LOGO_R) / ZT - x0) / (x1 - x0), LOGO_Z + w * LOGO_R)
+        q = iso((p[0], p[1] * SY, p[2]))
+        return np.array([q[0] + ax, q[1] + ay])
+    o = scr(0, 0)
+    return o, scr(1, 0) - o, scr(0, 1) - o
+
+
+def _logo_light():
+    """How the sun lights the flank, applied lightly so the logo sits in the scene but keeps its colours."""
+    pts = [flank(1, 0.3, 80), flank(1, 0.6, 80), flank(1, 0.6, 130)]
+    pts = [(p[0], p[1] * SY, p[2]) for p in pts]
+    n = normal(pts)
+    if n[1] < 0: n = -n
+    k = shade((255, 255, 255), n, 0.0)[0] / 255.0
+    return 1.0 - 0.2 * (1.0 - k)
+
+
+def apply_logo(surf, ax, ay, scale=1):
+    """Warp the logo onto the flank of `surf` (drawn at `scale` x sprite size, before its downsample).
+    Premultiplied texture, prefiltered to about the sampling rate, and NSUB x NSUB supersampled per pixel
+    then box-averaged, so the disc rim and the white shapes come out soft with no fringe."""
+    NSUB = 4
+    tex = pygame.image.load(LOGO_PATH)
+    tex = pygame.image.frombytes(pygame.image.tobytes(tex, "RGBA"), tex.get_size(), "RGBA")
+    o, a, b = _logo_affine(ax / scale, ay / scale); o, a, b = o * scale, a * scale, b * scale
+    n = int(min(tex.get_width(), 2 * max(np.hypot(*a), np.hypot(*b)) * NSUB))   # texels ~ subsamples
+    tex = pygame.transform.smoothscale(tex, (n, n))                             # area-filtered minify
+    T = np.dstack([pygame.surfarray.array3d(tex), pygame.surfarray.array_alpha(tex)]).astype(np.float32)
+    T[..., :3] *= T[..., 3:4] / 255.0                                            # premultiply
+    corners = [o + su * a + sw * b for su in (-1, 1) for sw in (-1, 1)]
+    X0, Y0 = np.floor(np.min(corners, 0)).astype(int) - 1; X1, Y1 = np.ceil(np.max(corners, 0)).astype(int) + 2
+    X0, Y0 = max(X0, 0), max(Y0, 0); X1, Y1 = min(X1, surf.get_width()), min(Y1, surf.get_height())
+    inv = np.linalg.inv(np.array([[a[0], b[0]], [a[1], b[1]]]))
+    c = np.zeros((X1 - X0, Y1 - Y0, 4), np.float32)
+    for sy_ in range(NSUB):
+        for sx_ in range(NSUB):
+            xs, ys = np.meshgrid(np.arange(X0, X1) + (sx_ + 0.5) / NSUB, np.arange(Y0, Y1) + (sy_ + 0.5) / NSUB,
+                                 indexing="ij")
+            dx, dy = xs - o[0], ys - o[1]
+            u = inv[0, 0] * dx + inv[0, 1] * dy; w = inv[1, 0] * dx + inv[1, 1] * dy
+            tx = (u + 1) / 2 * n - 0.5; ty = (1 - w) / 2 * n - 0.5
+            i0 = np.floor(tx).astype(int); j0 = np.floor(ty).astype(int)
+            fx = (tx - i0)[..., None]; fy = (ty - j0)[..., None]
+            def g(i, j):
+                ok = ((i >= 0) & (i < n) & (j >= 0) & (j < n))[..., None]
+                return T[np.clip(i, 0, n - 1), np.clip(j, 0, n - 1)] * ok
+            c += (g(i0, j0) * (1 - fx) * (1 - fy) + g(i0 + 1, j0) * fx * (1 - fy) +
+                  g(i0, j0 + 1) * (1 - fx) * fy + g(i0 + 1, j0 + 1) * fx * fy)
+    c /= NSUB * NSUB
+    px = pygame.surfarray.pixels3d(surf); pa = pygame.surfarray.pixels_alpha(surf)
+    cover = pa[X0:X1, Y0:Y1, None] / 255.0                                      # only onto the cabin itself
+    al = c[..., 3:4] / 255.0 * cover
+    pre = c[..., :3] * cover * _logo_light()                                    # premultiplied, lit
+    dst = px[X0:X1, Y0:Y1].astype(np.float32)
+    px[X0:X1, Y0:Y1] = (dst * (1 - al) + pre).round().clip(0, 255).astype(np.uint8)
+    del px, pa
+
+
 def build():
     m = Model()
     rings = [ring_pts(r) for r in RINGS]
@@ -160,7 +230,7 @@ def build():
         for w in (w1, w2):
             m.face(facing(w, out), GOLDW, 0.6, 0.6)
         # panel seams
-        for sx in (0.18, 0.42, 0.66):
+        for sx in ((0.18, 0.42, 0.66) if side < 0 else (0.18, 0.66)):
             q = [flank(side, sx, 52), flank(side, sx + 0.01, 52), flank(side, sx + 0.006, 138), flank(side, sx, 138)]
             m.face(facing(q, out), SEAM, 0.1, 0.6)
         q = [flank(side, 0.0, 66), flank(side, 1.0, 66), flank(side, 1.0, 68), flank(side, 0.0, 68)]
@@ -259,7 +329,7 @@ def shade(col, n, spec):
     return tuple(int(min(255, c * k + sp)) for c in col)
 
 
-def render_model(m):
+def render_model(m, post=None):
     faces = []
     for pts, col, spec, bias in m.faces:
         n = normal(pts)
@@ -276,6 +346,8 @@ def render_model(m):
         poly = [((iso(p)[0] - x0) * SS, (iso(p)[1] - y0) * SS) for p in pts]
         pygame.draw.polygon(big, col, poly)
         pygame.draw.polygon(big, col, poly, 1)       # close hairline seams
+    if post:
+        post(big, -x0 * SS, -y0 * SS, SS)            # decals painted at the supersampled stage
     # dark outline for punch, as on the other sprites
     ol = pygame.mask.from_surface(big).outline()
     out = pygame.Surface(big.get_size(), pygame.SRCALPHA)
@@ -287,7 +359,7 @@ def render_model(m):
 
 
 def frame_bytes(key="rover"):
-    surf, ax, ay = render_model(build())
+    surf, ax, ay = render_model(build(), post=apply_logo)
     return (key, pygame.image.tobytes(surf, "RGBA"), surf.get_size(), ax, ay)
 
 
@@ -338,19 +410,19 @@ def _top_at(x):
     return 0.0
 
 
+ROOF_Z = 150.0
+
+
 def height_at(rx, ry, x, y, rad=0.0):
-    """Height (px) of the rover's solid top under (x, y), 0 if clear of it."""
+    """Height (px) of the rover's solid top under (x, y), 0 if clear of it. The whole footprint is one
+    solid block: wheel-arch height out at the sides, the hull profile over the body, and a generous
+    flat roof (stretched by rad at its edges) so Jetman settles on top reliably."""
     u, v = x - rx, y - ry
     if abs(u) > HALF_L + rad or abs(v) > HALF_W + rad:
         return 0.0
-    h = 0.0
-    if abs(v) <= BODY_W * SY + rad:
-        h = _top_at(max(RINGS[0][0], min(RINGS[-1][0], u)))
-    if abs(abs(v) - WHEEL_Y) <= WHEEL_HW + rad:
-        for wx in WHEEL_X:
-            if abs(u - wx) <= WHEEL_R / ZT + rad:
-                h = max(h, 89.0)
-    return h
+    if RINGS[1][0] - rad <= u <= RINGS[2][0] + rad:
+        return ROOF_Z                                 # the roof block, side to side over the wheels too
+    return max(89.0, _top_at(max(RINGS[0][0], min(RINGS[-1][0], u))))
 
 
 def in_footprint(rx, ry, x, y, rad=0.0):

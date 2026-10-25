@@ -1,9 +1,10 @@
 """The Alien Missile Base, after the launch site in Ultimate's Lunar Jetman (1983).
 
-An octagonal armoured launchpad with a raised plinth; on it a turret that
-slowly turns, carrying a gold launcher arm with two missiles raised at 50
-degrees. Six protective field devices (pylons with glowing emitter heads)
-stand guard round the pad. Built as a 3D polygon model with the same strict
+A grown, not built, launch site: a lumpy carapace pad laced with glowing
+veins and ringed by bone tusks; on its hub a seed-pod turret that slowly
+turns, with a stalked eye and two claws cradling acid-green crystal missiles
+raised at 48 degrees. Six bone spires topped with glowing orbs project a
+shimmering force-field dome over the whole site. Built as a 3D polygon model with the same strict
 2:1 isometric projection, light and shading as the rover (see rover.py).
 
 Units: x, y in tiles; z in screen pixels (32 px = 1 tile).
@@ -17,17 +18,20 @@ from rover import ZT, facing
 
 FRAMES = 16                           # turret rotation frames (full turn)
 
-STEEL = (150, 154, 160)
-STEEL_D = (96, 100, 108)
-DECK = (118, 120, 124)
-DARK = (46, 48, 54)
-GOLD = (210, 168, 56)
-GOLD_D = (150, 116, 36)
-WHITE = (226, 228, 230)
-RED = (214, 44, 40)
-HAZ = (226, 186, 40)
-CYAN = (110, 236, 236)
-CYAN_D = (40, 150, 160)
+# alien palette: dark carapace and pale bone, lit by acid-green veins and a magenta eye
+SHELL = (64, 82, 84)
+SHELL_D = (40, 54, 58)
+SHELL_L = (92, 112, 110)
+BONE = (186, 188, 160)
+BONE_D = (128, 132, 108)
+VEIN = (150, 255, 110)
+VEIN_D = (60, 170, 70)
+ACID = (220, 255, 80)
+MAG = (232, 70, 180)
+MAG_D = (140, 30, 110)
+ORB = (150, 255, 220)
+ORB_D = (50, 190, 170)
+DARK = (26, 34, 36)
 
 PAD_R, PAD_Z = 2.7, 18.0
 PLINTH_R, PLINTH_Z = 1.35, 32.0
@@ -35,25 +39,33 @@ TURRET_R, TURRET_Z = 0.78, 62.0
 PYLON_R, PYLON_H = 3.75, 92.0
 PYLONS = [(PYLON_R * math.cos(math.tau * (i + 0.5) / 6), PYLON_R * math.sin(math.tau * (i + 0.5) / 6)) for i in range(6)]
 HALF = 4.15                           # square footprint half-size (tiles) for depth sorting
+FIELD_R, FIELD_H = 4.05, 150.0        # force-field dome: radius (tiles) and height (px)
 
 
 def _ngon(cx, cy, r, n, rot=0.0):
     return [(cx + r * math.cos(rot + i * math.tau / n), cy + r * math.sin(rot + i * math.tau / n)) for i in range(n)]
 
 
-def prism(m, base, z0, z1, col, spec=0.2, top=None, side=None, bias=0.0, tbias=None):
-    """Vertical prism over a convex polygon (list of (x, y)); faces oriented outwards."""
-    cx = sum(p[0] for p in base) / len(base); cy = sum(p[1] for p in base) / len(base)
-    lo = [(x, y, z0) for x, y in base]; hi = [(x, y, z1) for x, y in base]
-    m.face(facing(hi, (0, 0, 1)), top or col, spec, bias if tbias is None else tbias)
-    m.face(facing(lo, (0, 0, -1)), col, spec, bias)
-    n = len(base)
-    for i in range(n):
-        a, b = base[i], base[(i + 1) % n]
-        q = [lo[i], lo[(i + 1) % n], hi[(i + 1) % n], hi[i]]
-        out = ((a[0] + b[0]) / 2 - cx, (a[1] + b[1]) / 2 - cy, 0)
-        c = side(i) if side else col
-        m.face(facing(q, out), c, spec, bias)
+def lathe(m, rings, n, col, spec=0.3, bias=0.0, rot=0.0, cols=None, top=None, wob=None, tbias=None):
+    """Surface of revolution. rings: [(cx, cy, r, z)] bottom to top (r tiles, z px); the centre may wander
+    so stalks can bend. cols(i, k) picks a colour per side i and band k; wob(i, k) scales the radius."""
+    R = []
+    for k, (cx, cy, r, z) in enumerate(rings):
+        R.append([(cx + r * (wob(i, k) if wob else 1) * math.cos(rot + i * math.tau / n),
+                   cy + r * (wob(i, k) if wob else 1) * math.sin(rot + i * math.tau / n), z) for i in range(n)])
+    for k in range(len(rings) - 1):
+        (ax, ay, r0, z0), (bx, by, r1, z1) = rings[k], rings[k + 1]
+        dz, dr = (z1 - z0) / ZT, r1 - r0
+        for i in range(n):
+            q = [R[k][i], R[k][(i + 1) % n], R[k + 1][(i + 1) % n], R[k + 1][i]]
+            if r0 < 1e-3: q = [q[0], q[2], q[3]]
+            elif r1 < 1e-3: q = q[:3]
+            a = rot + (i + 0.5) * math.tau / n
+            out = (math.cos(a) * dz, math.sin(a) * dz, -dr)
+            c = cols(i, k) if cols else col
+            m.face(facing(q, out), c, spec, bias)
+    if rings[-1][2] > 1e-3:
+        m.face(facing(R[-1], (0, 0, 1)), top or col, spec, bias if tbias is None else tbias)
 
 
 def solid(m, pts8, col, spec=0.3, bias=0.0, cols=None):
@@ -65,135 +77,150 @@ def solid(m, pts8, col, spec=0.3, bias=0.0, cols=None):
         m.face(facing(q, fc - c), (cols[j] if cols else col), spec, bias)
 
 
-def obox(m, piv, th, el, u0, u1, w, h0, h1, col, spec=0.3, bias=0.0, cols=None):
-    """Box in a frame rotated th about z and pitched el about the side axis, pivot piv (x, y, z px).
-    u along the arm (tiles), w half-width (tiles), h0..h1 across the arm (tiles)."""
-    ca, sa, ce, se = math.cos(th), math.sin(th), math.cos(el), math.sin(el)
-    fwd = np.array([ca * ce, sa * ce, se]); side = np.array([-sa, ca, 0.0]); up = np.cross(fwd, side) * -1
-    if up[2] < 0: up = -up
-    P0 = np.array([piv[0], piv[1], piv[2] / ZT])
-    pts = []
-    for hh in (h0, h1):
-        for uu, ww in ((u0, -w), (u1, -w), (u1, w), (u0, w)):
-            p = P0 + fwd * uu + side * ww + up * hh
-            pts.append((p[0], p[1], p[2] * ZT))
-    solid(m, pts, col, spec, bias, cols)
-
-
-def missile(m, piv, th, el, off, n=8):
-    """A slim missile along the arm: white body, red nose cone, dark fins."""
+def _frame(th, el):
     ca, sa, ce, se = math.cos(th), math.sin(th), math.cos(el), math.sin(el)
     fwd = np.array([ca * ce, sa * ce, se]); side = np.array([-sa, ca, 0.0]); up = np.cross(side, fwd)
-    P0 = np.array([piv[0], piv[1], piv[2] / ZT]) + side * off + up * 0.2
-    r = 0.17
-    def ring(u, rr):
-        return [P0 + fwd * u + (side * math.cos(i * math.tau / n) + up * math.sin(i * math.tau / n)) * rr for i in range(n)]
+    return fwd, side, up
+
+
+def crystal(m, P0, fwd, side, up, length, r, col, col_d, tip, n=6, bias=0.4):
+    """An elongated hexagonal crystal (the alien missile) along fwd from P0 (tiles, z in tiles)."""
     def mp(p): return (p[0], p[1], p[2] * ZT)
-    secs = [(-0.75, r * 0.85, DARK), (-0.65, r, WHITE), (1.05, r, WHITE), (1.3, r * 0.7, RED), (1.55, 0.01, RED)]
-    centre = P0 + fwd * 0.3
-    for (ua, ra, _), (ub, rb, cb) in zip(secs, secs[1:]):
-        A, B = ring(ua, ra), ring(ub, rb)
+    secs = [(-0.15, 0.01), (0.1, r), (length * 0.7, r * 0.95), (length, 0.01)]
+    for (ua, ra), (ub, rb) in zip(secs, secs[1:]):
         for i in range(n):
-            q = [mp(A[i]), mp(A[(i + 1) % n]), mp(B[(i + 1) % n]), mp(B[i])]
-            mid = (A[i] + B[(i + 1) % n]) / 2
-            out = mid - (P0 + fwd * ((ua + ub) / 2))
-            col = cb if not (cb == WHITE and i % 4 == 0 and 0.2 < (ua + ub) / 2 < 0.4) else RED
-            m.face(facing(q, out), col, 0.5, 0.4)
-    m.face(facing([mp(p) for p in ring(-0.75, r * 0.85)], -fwd), DARK, 0.2, 0.4)
-    for k in (0, 2):                                   # fins
-        d = side if k == 0 else up
-        a = P0 + fwd * -0.7; b = P0 + fwd * -0.2
-        q = [mp(a + d * r), mp(b + d * r), mp(a + d * (r + 0.2))]
-        m.face(facing(q, np.cross(fwd, d)), RED, 0.3, 0.5)
-        q = [mp(a - d * r), mp(b - d * r), mp(a - d * (r + 0.2))]
-        m.face(facing(q, np.cross(fwd, d)), RED, 0.3, 0.5)
+            a0, a1 = i * math.tau / n, (i + 1) * math.tau / n
+            A0 = P0 + fwd * ua + (side * math.cos(a0) + up * math.sin(a0)) * ra
+            A1 = P0 + fwd * ua + (side * math.cos(a1) + up * math.sin(a1)) * ra
+            B1 = P0 + fwd * ub + (side * math.cos(a1) + up * math.sin(a1)) * rb
+            B0 = P0 + fwd * ub + (side * math.cos(a0) + up * math.sin(a0)) * rb
+            q = [mp(A0), mp(A1), mp(B1), mp(B0)]
+            if ra < 0.02: q = [q[0], q[2], q[3]]
+            elif rb < 0.02: q = q[:3]
+            am = (a0 + a1) / 2
+            out = side * math.cos(am) + up * math.sin(am) + fwd * (0.3 if ub > length * 0.8 else -0.3 if ua < 0 else 0)
+            c = tip if ua >= length * 0.7 else (col if i % 2 else col_d)
+            m.face(facing(q, out), c, 0.9, bias)
 
 
-def pylon(m, px, py):
-    """A protective field device: footing, tapered mast, collar and a glowing emitter head."""
-    prism(m, _ngon(px, py, 0.42, 6), 0, 10, STEEL_D, 0.2)
-    lo = _ngon(px, py, 0.17, 6); hi = _ngon(px, py, 0.11, 6)
-    for i in range(6):
-        q = [(lo[i][0], lo[i][1], 10), (lo[(i + 1) % 6][0], lo[(i + 1) % 6][1], 10),
-             (hi[(i + 1) % 6][0], hi[(i + 1) % 6][1], PYLON_H - 22), (hi[i][0], hi[i][1], PYLON_H - 22)]
-        mx = (lo[i][0] + lo[(i + 1) % 6][0]) / 2 - px; my = (lo[i][1] + lo[(i + 1) % 6][1]) / 2 - py
-        m.face(facing(q, (mx, my, 0)), STEEL if i % 2 else STEEL_D, 0.4)
-    prism(m, _ngon(px, py, 0.26, 6), PYLON_H - 26, PYLON_H - 20, GOLD, 0.6, bias=0.2)
-    # emitter: faceted crystal (double pyramid) in field cyan
-    eq = _ngon(px, py, 0.24, 6)
-    zc = PYLON_H - 8
-    for i in range(6):
-        a, b = eq[i], eq[(i + 1) % 6]
-        for zt, out_z in ((PYLON_H + 6, 1), (PYLON_H - 20, -1)):
-            q = [(a[0], a[1], zc), (b[0], b[1], zc), (px, py, zt)]
-            mx = (a[0] + b[0]) / 2 - px; my = (a[1] + b[1]) / 2 - py
-            m.face(facing(q, (mx, my, out_z * 0.6)), CYAN if (i % 2 or out_z > 0) else CYAN_D, 0.9, 0.3)
+def pylon(m, px, py, seed=0):
+    """A grown field spire: a ribbed root bulb, a bent bone stalk leaning in, thorns and a glowing orb."""
+    rnd = np.random.default_rng(seed)
+    d = math.hypot(px, py); ix, iy = -px / d, -py / d          # leans towards the pad
+    lean = 0.28 + rnd.uniform(0, 0.12)
+    lathe(m, [(px, py, 0.46, 0), (px, py, 0.5, 4), (px, py, 0.36, 12), (px, py, 0.18, 18)], 7, SHELL, 0.3,
+          rot=seed, cols=lambda i, k: SHELL_L if i % 2 else SHELL_D)
+    rings = []
+    for k in range(7):
+        t = k / 6
+        bend = lean * t * t
+        r = 0.17 * (1 - 0.55 * t) * (1.25 if k in (2, 4) else 1.0)
+        rings.append((px + ix * bend, py + iy * bend, r, 16 + t * (PYLON_H - 30)))
+    lathe(m, rings, 6, BONE, 0.35, rot=seed * 0.7, cols=lambda i, k: BONE if (i + k) % 2 else BONE_D)
+    tx, ty = px + ix * lean, py + iy * lean
+    ztop = PYLON_H - 14
+    # three curling thorns cradling the orb
+    for j in range(3):
+        a = seed + j * math.tau / 3
+        ox, oy = math.cos(a), math.sin(a)
+        b = (tx + ox * 0.05, ty + oy * 0.05, ztop - 6)
+        tip = (tx + ox * 0.3, ty + oy * 0.3, ztop + 14)
+        w = 0.05
+        q1 = [(b[0] - oy * w, b[1] + ox * w, b[2]), (b[0] + oy * w, b[1] - ox * w, b[2]), tip]
+        m.face(facing(q1, (ox, oy, 0.2)), BONE, 0.4, 0.2)
+        m.face(facing(q1, (-ox, -oy, -0.2)), BONE_D, 0.4, 0.2)
+    # the orb: a faceted sphere glowing field green
+    zc = ztop + 8; rr = 0.24
+    sph = [(tx, ty, rr * math.sin(a), zc + rr * ZT * -math.cos(a)) for a in np.linspace(0, math.pi, 6)]
+    lathe(m, [(x, y, max(0.0, r), z) for x, y, r, z in sph], 8, ORB, 0.9, bias=0.3,
+          cols=lambda i, k: ORB if k >= 2 else ORB_D)
 
 
 def build(frame=0, parts=("pad", "turret", "pylons")):
     m = rv.Model(); m.sy = 1.0
     th = frame * math.tau / FRAMES
     if "pad" in parts:
-        oct8 = _ngon(0, 0, PAD_R, 8, math.pi / 8)
-        prism(m, oct8, 0, PAD_Z, STEEL_D, 0.2, top=DECK, side=lambda i: STEEL_D if i % 2 else STEEL, tbias=-9.0)
-        # gold trim band round the pad edge
-        tb = _ngon(0, 0, PAD_R + 0.03, 8, math.pi / 8)
-        for i in range(8):
-            a, b = tb[i], tb[(i + 1) % 8]
-            q = [(a[0], a[1], PAD_Z - 7), (b[0], b[1], PAD_Z - 7), (b[0], b[1], PAD_Z - 3), (a[0], a[1], PAD_Z - 3)]
-            m.face(facing(q, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0)), GOLD, 0.7, 0.1)
-        # hazard chevrons on the deck: alternate gold/dark trapezoids round the rim
-        ring_o = _ngon(0, 0, PAD_R - 0.15, 32); ring_i = _ngon(0, 0, PAD_R - 0.5, 32)
-        for i in range(32):
-            a, b = ring_o[i], ring_o[(i + 1) % 32]; c, d = ring_i[(i + 1) % 32], ring_i[i]
-            q = [(a[0], a[1], PAD_Z + 0.5), (b[0], b[1], PAD_Z + 0.5), (c[0], c[1], PAD_Z + 0.5), (d[0], d[1], PAD_Z + 0.5)]
-            m.face(facing(q, (0, 0, 1)), HAZ if i % 2 else DARK, 0.3, -3.5)
-        # four access ramps / steps
-        for k in range(4):
-            a = k * math.pi / 2
+        # a low grown carapace: a lumpy many-lobed disc rather than a machined octagon
+        lob = lambda i, k: 1.0 + 0.035 * math.sin(i * 7 * math.tau / 28 + 0.6) + 0.02 * math.sin(i * 3 * math.tau / 28)
+        lathe(m, [(0, 0, PAD_R + 0.12, 0), (0, 0, PAD_R, PAD_Z * 0.6), (0, 0, PAD_R - 0.2, PAD_Z)], 28, SHELL, 0.25,
+              cols=lambda i, k: (SHELL_D if i % 3 == 0 else SHELL) if k == 0 else SHELL_L, top=SHELL, wob=lob, tbias=-9.0)
+        # glowing veins: curved spokes that branch towards the rim, uneven like roots
+        for j in range(7):
+            a0 = j * math.tau / 7 + (0.25 if j % 2 else -0.1)
+            curl = 0.5 if j % 3 else -0.35
+            pts = []
+            for s in np.linspace(0.0, 1.0, 9):
+                r = PLINTH_R + 0.05 + s * (PAD_R - 0.45 - PLINTH_R)
+                a = a0 + curl * s * s
+                w = 0.07 * (1 - 0.6 * s) + 0.02
+                pts.append((r, a, w))
+            for (r0, a0_, w0), (r1, a1_, w1) in zip(pts, pts[1:]):
+                p = lambda r, a, o: (r * math.cos(a) - math.sin(a) * o, r * math.sin(a) + math.cos(a) * o, PAD_Z + 0.5)
+                q = [p(r0, a0_, -w0), p(r1, a1_, -w1), p(r1, a1_, w1), p(r0, a0_, w0)]
+                m.face(facing(q, (0, 0, 1)), VEIN, 0.4, -3.5)
+            # a node of light where each vein ends
+            r, a, _ = pts[-1]
+            ex, ey = r * math.cos(a), r * math.sin(a)
+            lathe(m, [(ex, ey, 0.13, PAD_Z), (ex, ey, 0.1, PAD_Z + 3), (ex, ey, 0.0, PAD_Z + 5)], 6, ACID, 0.9, bias=0.4)
+        # five curved ribs (tusks) rising round the rim at uneven spacing
+        for j, a in enumerate((0.3, 1.45, 2.5, 3.9, 5.1)):
             ca, sa = math.cos(a), math.sin(a)
-            r0, r1, w = PAD_R - 0.1, PAD_R + 0.75, 0.42
-            base = [(ca * r0 - sa * -w, sa * r0 + ca * -w), (ca * r1 - sa * -w, sa * r1 + ca * -w),
-                    (ca * r1 - sa * w, sa * r1 + ca * w), (ca * r0 - sa * w, sa * r0 + ca * w)]
-            pts = [(x, y, 0) for x, y in base] + [(base[0][0], base[0][1], PAD_Z), (base[1][0], base[1][1], 2),
-                                                  (base[2][0], base[2][1], 2), (base[3][0], base[3][1], PAD_Z)]
-            solid(m, pts, STEEL, 0.25, -0.2)
-        # corner landing lights
-        for x, y in _ngon(0, 0, PAD_R - 0.28, 8, math.pi / 8):
-            prism(m, _ngon(x, y, 0.09, 6), PAD_Z, PAD_Z + 4, RED, 1.0, bias=0.4)
-        # raised plinth with a dark slot ring
-        prism(m, _ngon(0, 0, PLINTH_R, 8, math.pi / 8), PAD_Z, PLINTH_Z, STEEL, 0.3, top=STEEL_D,
-              side=lambda i: STEEL if i % 2 else STEEL_D)
-        prism(m, _ngon(0, 0, 0.95, 16), PLINTH_Z, PLINTH_Z + 2, DARK, 0.1, bias=0.1)
+            prev = None
+            for s in np.linspace(0, 1, 6):
+                r = PAD_R + 0.35 - s * 0.75
+                z = 2 + s * (24 + 6 * (j % 2))
+                w = 0.2 * (1 - s) + 0.03
+                ring = [(ca * r - sa * -w, sa * r + ca * -w), (ca * r - sa * w, sa * r + ca * w)]
+                cur = [(x, y, z - 3 * (1 - s)) for x, y in ring] + [(ca * (r + 0.12 * (1 - s)), sa * (r + 0.12 * (1 - s)), z + 3)]
+                if prev:
+                    for u, v in ((0, 2), (2, 1), (1, 0)):
+                        q = [prev[u], prev[v], cur[v], cur[u]]
+                        mid = np.mean(q, axis=0)
+                        out = (mid[0] - ca * (r - 0.3), mid[1] - sa * (r - 0.3), (mid[2] - z) / ZT + 0.2)
+                        m.face(facing(q, out), BONE if u != 1 else BONE_D, 0.4, 0.1)
+                prev = cur
+        # raised organic hub: a bulb with a dark socket for the launcher
+        lathe(m, [(0, 0, PLINTH_R, PAD_Z), (0, 0, PLINTH_R + 0.1, PAD_Z + 6), (0, 0, PLINTH_R - 0.1, PLINTH_Z - 3),
+                  (0, 0, 1.0, PLINTH_Z)], 14, SHELL_L, 0.35, top=DARK,
+              cols=lambda i, k: MAG_D if (k == 1 and i % 2) else (SHELL_L if i % 2 else SHELL))
     if "turret" in parts:
-        # turning drum
-        prism(m, _ngon(0, 0, TURRET_R, 12, th), PLINTH_Z + 2, TURRET_Z - 10, GOLD_D, 0.4, top=GOLD,
-              side=lambda i: GOLD if i % 2 else GOLD_D, bias=0.2, tbias=1.2)
-        prism(m, _ngon(0, 0, TURRET_R * 0.72, 12, th), TURRET_Z - 10, TURRET_Z, GOLD, 0.6, bias=1.25, tbias=1.4)
-        ca, sa = math.cos(th), math.sin(th)
         n0 = len(m.faces)
-        # cab/radar block at the back of the drum
-        obox(m, (-ca * 0.35, -sa * 0.35, TURRET_Z), th, 0.0, -0.3, 0.25, 0.32, 0.0, 0.55, STEEL, 0.4, 0.35)
-        # radar dish on a short mast
-        obox(m, (-ca * 0.45, -sa * 0.45, TURRET_Z + 17), th, 0.0, -0.05, 0.05, 0.04, 0.0, 0.5, DARK, 0.2, 0.4)
-        dish_c = (-ca * 0.45, -sa * 0.45, TURRET_Z + 34)
-        dpts = [(dish_c[0] + (-sa) * math.cos(i * math.tau / 10) * 0.32, dish_c[1] + ca * math.cos(i * math.tau / 10) * 0.32,
-                 dish_c[2] + math.sin(i * math.tau / 10) * 0.32 * ZT) for i in range(10)]
-        m.face(facing(dpts, (-ca, -sa, 0)), WHITE, 0.6, 0.5)
-        m.face(facing(dpts, (ca, sa, 0)), STEEL_D, 0.2, 0.45)
-        # launcher: two cheek plates and a gold rail arm pitched up, two missiles
+        # the turning pod: an onion-shaped seed head with magenta gills
+        lathe(m, [(0, 0, TURRET_R * 0.7, PLINTH_Z), (0, 0, TURRET_R, PLINTH_Z + 10), (0, 0, TURRET_R * 0.9, TURRET_Z - 10),
+                  (0, 0, TURRET_R * 0.5, TURRET_Z), (0, 0, 0.12, TURRET_Z + 4)], 10, SHELL, 0.5, rot=th, bias=0.2,
+              cols=lambda i, k: (MAG if i % 2 else SHELL_D) if k == 1 else (SHELL_L if i % 2 else SHELL), top=VEIN)
+        ca, sa = math.cos(th), math.sin(th)
+        # a stalked eye at the back, watching the sky
+        sx, sy = -ca * 0.5, -sa * 0.5
+        lathe(m, [(sx, sy, 0.08, TURRET_Z - 4), (sx - ca * 0.1, sy - sa * 0.1, 0.06, TURRET_Z + 16),
+                  (sx - ca * 0.05, sy - sa * 0.05, 0.05, TURRET_Z + 26)], 5, BONE_D, 0.3, bias=0.5)
+        ez = TURRET_Z + 34; ex, ey = sx - ca * 0.05, sy - sa * 0.05
+        sph = [(ex, ey, 0.2 * math.sin(a), ez - 0.2 * ZT * math.cos(a)) for a in np.linspace(0, math.pi, 6)]
+        lathe(m, sph, 8, MAG, 0.9, bias=0.6, rot=th,
+              cols=lambda i, k: DARK if (k in (2, 3) and i in (0, 7)) else (MAG if k >= 2 else MAG_D))
+        # launcher: a pair of curved claws cradling two acid crystals pitched up
         el = math.radians(48)
-        piv = (ca * 0.15, sa * 0.15, TURRET_Z + 22)
+        fwd, side, up = _frame(th, el)
+        piv = np.array([ca * 0.15, sa * 0.15, (TURRET_Z + 14) / ZT])
         for s in (-1, 1):
-            obox(m, (piv[0] - sa * s * 0.42, piv[1] + ca * s * 0.42, TURRET_Z), th, 0.0, -0.35, 0.35, 0.06, 0.0, 0.95, GOLD_D, 0.5, 0.35)
-        obox(m, piv, th, el, -0.8, 1.2, 0.44, -0.08, 0.06, GOLD, 0.7, 0.5)
-        obox(m, piv, th, el, -0.2, 0.2, 0.46, -0.16, 0.0, STEEL_D, 0.3, 0.45)
-        for off in (-0.25, 0.25):
-            missile(m, piv, th, el, off)
-        m.faces[n0:] = [(p, c, sp, b + 2.0) for p, c, sp, b in m.faces[n0:]]     # all above the drum top
+            prev = None
+            for t in np.linspace(0, 1, 5):
+                p = piv + side * s * (0.42 - 0.12 * math.sin(t * math.pi)) + fwd * (t * 1.1 - 0.4) - up * (0.25 * math.sin(t * math.pi))
+                w = 0.08 * (1 - 0.6 * t) + 0.02
+                cur = [p + up * w, p - up * w * 0.5 + side * s * w, p - up * w * 0.5 - side * s * w]
+                if prev is not None:
+                    for u, v in ((0, 1), (1, 2), (2, 0)):
+                        q = [prev[u], prev[v], cur[v], cur[u]]
+                        mid = np.mean(q, axis=0)
+                        out = mid - (p - fwd * 0.1)
+                        m.face(facing([(x, y, z * ZT) for x, y, z in q], (out[0], out[1], out[2])), BONE if u == 0 else BONE_D, 0.4, 0.45)
+                prev = cur
+        for off in (-0.2, 0.2):
+            crystal(m, piv + side * off + up * 0.05, fwd, side, up, 1.7, 0.2, VEIN, VEIN_D, ACID)
+        m.faces[n0:] = [(p, c, sp, b + 2.0) for p, c, sp, b in m.faces[n0:]]     # all above the pod top
     if "pylons" in parts:
-        for px, py in PYLONS:
-            pylon(m, px, py)
+        for i, (px, py) in enumerate(PYLONS):
+            pylon(m, px, py, i)
     return m
 
 
@@ -233,7 +260,7 @@ def shadow_sprite():
         return np.array(out)
     hulls.append(_hull(proj(groups[0])))
     for px, py in PYLONS:
-        m = rv.Model(); m.sy = 1.0; pylon(m, px, py)
+        m = rv.Model(); m.sy = 1.0; pylon(m, px, py, PYLONS.index((px, py)))
         hulls.append(_hull(proj(m)))
     allp = np.array([p for h in hulls for p in h])
     x0, y0 = allp.min(0) - 12; x1, y1 = allp.max(0) + 12
@@ -245,10 +272,106 @@ def shadow_sprite():
     return s, -x0, -y0
 
 
+# ------------------------------------------------------------ force field
+FIELD_FRAMES = 24                     # one shimmer cycle (~2 s)
+FIELD_COL = np.array([70.0, 255.0, 190.0])
+
+
+def field_e(bx, by, x, y, z, rad=0.0, zpad=0.0):
+    """< 1 inside the dome (optionally inflated by rad tiles and zpad px), > 1 outside."""
+    return ((x - bx) ** 2 + (y - by) ** 2) / (FIELD_R + rad) ** 2 + (max(0.0, z) / (FIELD_H + zpad)) ** 2
+
+
+def _hexline(u, v, size):
+    """0 at the centre of a hex cell, 1 on its edges (u, v in tiles)."""
+    q = (u * 2 / 3) / size
+    r = (-u / 3 + v / math.sqrt(3)) / size
+    # cube round
+    x, z = q, r; y = -x - z
+    rx, ry, rz = np.round(x), np.round(y), np.round(z)
+    dx, dy, dz = abs(rx - x), abs(ry - y), abs(rz - z)
+    m1 = (dx > dy) & (dx > dz); m2 = (~m1) & (dy > dz)
+    rx = np.where(m1, -ry - rz, rx); ry = np.where(m2, -rx - rz, ry); rz = -rx - ry
+    cu = size * 1.5 * rx; cv = size * math.sqrt(3) * (rz + rx / 2)
+    du, dv = u - cu, v - cv
+    # hex (flat-top) distance normalised to 1 at the edge
+    au, av = np.abs(du), np.abs(dv)
+    return np.maximum(av / (size * math.sqrt(3) / 2), (au * math.sqrt(3) / 2 + av / 2) / (size * math.sqrt(3) / 2))
+
+
+def field_frames():
+    """The dome as additive RGB layers (black = no light): (back, front) per frame, anchored on the
+    base origin. Ray-cast per pixel through the strict 2:1 projection: screen (sx, sy) sees the points
+    x - y = sx/32, x + y = (sy + z)/16, so each pixel hits the ellipsoid at two heights."""
+    R, H = FIELD_R, FIELD_H
+    x0, x1 = -R * 32 * math.sqrt(2) - 4, R * 32 * math.sqrt(2) + 4
+    y0, y1 = -H - 6, R * 16 * math.sqrt(2) + 4
+    W_, H_ = int(x1 - x0), int(y1 - y0)
+    sx, sy = np.meshgrid(np.arange(W_) + x0 + 0.5, np.arange(H_) + y0 + 0.5)
+    a, c = sx / 32.0, sy / 16.0
+    A = 1 / (512 * R * R) + 1 / (H * H)
+    B = c / (16 * R * R)
+    C = (a * a + c * c) / (2 * R * R) - 1
+    disc = B * B - 4 * A * C
+    hit = disc > 0
+    sq = np.sqrt(np.where(hit, disc, 0))
+    out = []
+    layers = []
+    for zr in ((-B - sq) / (2 * A), (-B + sq) / (2 * A)):         # back, front
+        ok = hit & (zr >= 0)
+        b = c + zr / 16
+        X, Y = (a + b) / 2, (b - a) / 2
+        Z = zr / ZT
+        nrm = np.stack([X / R ** 2, Y / R ** 2, Z / (H / ZT) ** 2])
+        nrm /= np.linalg.norm(nrm, axis=0) + 1e-9
+        ndv = np.abs((nrm * rv.VIEW[:, None, None]).sum(0))
+        az = np.arctan2(Y, X)
+        el = np.arcsin(np.clip(zr / H, 0, 1))
+        hexd = _hexline(az * R, el * R * 1.3, 0.42)
+        layers.append((ok, ndv, az, el, hexd, zr))
+    for f in range(FIELD_FRAMES):
+        t = f / FIELD_FRAMES
+        pulse = 0.85 + 0.15 * math.sin(t * math.tau)
+        pair = []
+        for li, (ok, ndv, az, el, hexd, zr) in enumerate(layers):
+            rim = (1 - ndv) ** 3
+            edge = np.clip((hexd - 0.82) / 0.18, 0, 1) ** 2
+            # bands of energy rolling up the dome, and a shimmer that drifts round it
+            band = np.clip(np.sin(el * 9 - t * math.tau * 2) * 0.5 + 0.5, 0, 1) ** 6
+            shim = 0.5 + 0.5 * np.sin(az * 5 + el * 7 + t * math.tau)
+            foot = np.clip(1 - zr / 10, 0, 1)                         # bright seam where it meets the ground
+            k = (0.04 + 0.5 * rim + edge * (0.15 + 0.2 * shim) + band * 0.16 + foot * 0.6) * pulse
+            k *= 0.55 if li == 0 else 1.0
+            k = np.where(ok, k, 0)
+            rgb = np.clip(k[..., None] * FIELD_COL, 0, 255).astype(np.uint8)
+            surf = pygame.image.frombuffer(np.ascontiguousarray(rgb).tobytes(), (W_, H_), "RGB").copy()
+            pair.append(surf)
+        out.append((pair[0], pair[1], -x0, -y0))
+    return out
+
+
+def ripple_frames(n=12, size=90):
+    """A bright hex-flecked splash where something strikes the field (additive RGB)."""
+    out = []
+    yy, xx = np.mgrid[-size:size, -size:size] + 0.5
+    rr = np.hypot(xx, yy * 1.6) / size
+    hexd = _hexline(xx / 14.0, yy / 9.0, 0.5)
+    for i in range(n):
+        t = (i + 1) / n
+        ring = np.exp(-((rr - t * 0.9) / 0.09) ** 2) * (1 - t)
+        core = np.exp(-(rr / (0.25 + 0.3 * t)) ** 2) * (1 - t) ** 2
+        k = ring * (0.9 + 0.8 * (hexd > 0.8)) + core * 1.3
+        rgb = np.clip(k[..., None] * np.array([150.0, 255.0, 210.0]), 0, 255).astype(np.uint8)
+        out.append(pygame.image.frombuffer(np.ascontiguousarray(rgb).tobytes(), (2 * size, 2 * size), "RGB").copy())
+    return out
+
+
 class BaseSprites:
     def __init__(self):
         self.frames = {}
         self.shadow = None
+        self.field = None
+        self.ripples = None
 
     def accept(self, res):
         key, data, size, ax, ay = res
@@ -261,12 +384,19 @@ class BaseSprites:
             if pygame.display.get_surface():
                 sh = sh.convert_alpha()
             self.shadow = (sh, sx, sy)
+        if self.field is None:
+            conv = (lambda x: x.convert()) if pygame.display.get_surface() else (lambda x: x)
+            self.field = [(conv(b), conv(f), ax, ay) for b, f, ax, ay in field_frames()]
+            self.ripples = [conv(r) for r in ripple_frames()]
 
     def ready(self):
         return len(self.frames) == FRAMES
 
     def get(self, t):
         return self.frames[int(t * 1.6) % FRAMES]      # ~10 s per turn
+
+    def get_field(self, t):
+        return self.field[int(t * 12) % FIELD_FRAMES]
 
 
 # ------------------------------------------------------------ physical shape

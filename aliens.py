@@ -6,6 +6,7 @@ east, strict 2:1 isometric view), in a few spike colours, at several spin
 angles. Squash and stretch are applied when drawing.
 """
 import math
+import rover as rv
 import random
 
 import numpy as np
@@ -144,10 +145,15 @@ class Alien:
         self.land_t += dt
         self.hit_cool -= dt
         nx, ny = self.x + self.vx * dt, self.y + self.vy * dt
+        rx, ry = world.rover
         if world.blocked(nx, self.y, self.z, 0.28):
             self.vx = -self.vx * 0.9; nx = self.x
+            if rv.in_footprint(rx, ry, self.x, self.y, 0.4):          # bounce clear of the rover's flank
+                self.vx += math.copysign(0.6, self.x - rx)
         if world.blocked(self.x, ny, self.z, 0.28):
             self.vy = -self.vy * 0.9; ny = self.y
+            if rv.in_footprint(rx, ry, self.x, self.y, 0.4):
+                self.vy += math.copysign(0.6, self.y - ry)
         self.x, self.y = nx, ny
         self.vz -= GRAV * dt
         self.z += self.vz * dt

@@ -324,7 +324,7 @@ class World:
 
     def floor_at(self, x, y):
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
-        f = max(rv.height_at(self.rover[0], self.rover[1], x, y), bs.height_at(self.base[0], self.base[1], x, y))
+        f = max(rv.height_at(self.rover[0], self.rover[1], x, y, 0.3), bs.height_at(self.base[0], self.base[1], x, y))
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
                 for rk in self.chunk_rocks(ci + di, cj + dj):

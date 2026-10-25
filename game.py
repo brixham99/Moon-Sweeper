@@ -42,7 +42,7 @@ def sprite_cache_path():
     import hashlib
     here = os.path.dirname(os.path.abspath(__file__))
     h = hashlib.sha1()
-    for fn in ("jetman.py", "aliens.py", "rover.py", "base.py"):
+    for fn in ("jetman.py", "aliens.py", "rover.py", "base.py", os.path.join("assets", "esa_logo.png")):
         with open(os.path.join(here, fn), "rb") as f:
             h.update(f.read())
     return os.path.join(os.path.expanduser("~"), ".cache", "moon-sweeper", f"sprites-{h.hexdigest()[:12]}.pkl")
@@ -137,6 +137,7 @@ class Game:
         self.alien_spr = al.AlienSprites()
         self.rover_spr = None
         self.base_spr = bs.BaseSprites()
+        self.field_hits = []          # force-field strikes: (x, y, z, age)
         self.beacon_spr = self._beacon_sprites()
         self.n_red = 0
         self.frame_res, self.cache_path = [], sprite_cache_path()
@@ -234,6 +235,35 @@ class Game:
         return self.world.floor_at(self.x if x is None else x, self.y if y is None else y)
 
     # ------------------------------------------------------------ simulation
+    def field_hit(self, x, y, z, quiet=False):
+        bx, by = self.world.base
+        e = math.sqrt(bs.field_e(bx, by, x, y, z))          # put the splash on the dome's skin
+        x, y, z = bx + (x - bx) / e, by + (y - by) / e, z / e
+        if not any((x - h[0]) ** 2 + (y - h[1]) ** 2 < 0.5 and h[3] < 0.2 for h in self.field_hits):
+            self.field_hits.append((x, y, z, 0.0))
+            if not quiet:
+                self.sfx.play("bounce", 0.8)
+
+    def field_check(self, ox, oy, oz):
+        """The force field is a hard shell: Jetman can't pass into it (he bounces off with a flash).
+        If he's somehow inside (e.g. a test scene) he may leave freely."""
+        bx, by = self.world.base
+        R, ZP = 0.3, 20.0
+        if bs.field_e(bx, by, ox, oy, oz, R, ZP) < 1 or bs.field_e(bx, by, self.x, self.y, self.z, R, ZP) >= 1:
+            return
+        # outward normal at the contact, and bounce off it
+        nx_, ny_, nz_ = (ox - bx) / (bs.FIELD_R + R) ** 2, (oy - by) / (bs.FIELD_R + R) ** 2, oz / rv.ZT / ((bs.FIELD_H + ZP) / rv.ZT) ** 2
+        ln = math.sqrt(nx_ * nx_ + ny_ * ny_ + nz_ * nz_) or 1.0
+        nx_, ny_, nz_ = nx_ / ln, ny_ / ln, nz_ / ln
+        vn = self.vx * nx_ + self.vy * ny_ + self.vz / rv.ZT * nz_
+        if vn < 0:
+            k = 1.5
+            self.vx -= k * vn * nx_; self.vy -= k * vn * ny_; self.vz -= k * vn * nz_ * rv.ZT
+        self.vx += nx_ * 0.6; self.vy += ny_ * 0.6
+        if nz_ > 0.3: self.vz = max(self.vz, 90.0)
+        self.x, self.y, self.z = ox, oy, oz
+        self.field_hit(ox, oy, oz + 36)
+
     def update(self, dt, keys):
         self.t += dt
         turn = keys.get("right", 0) - keys.get("left", 0)
@@ -254,6 +284,7 @@ class Game:
             sp = math.hypot(self.vx, self.vy)
             if sp > FLY:
                 self.vx *= FLY / sp; self.vy *= FLY / sp
+        ox_, oy_, oz_ = self.x, self.y, self.z
         nx, ny = self.x + self.vx * dt, self.y + self.vy * dt
         if not self.world.blocked(nx, self.y, self.z): self.x = nx
         else: self.vx *= -0.2
@@ -275,7 +306,8 @@ class Game:
             if self.vz < -60 and alt > 0.5:
                 self.puff(int(10 + min(30, -self.vz / 6)), fl)
             self.z, self.vz = fl, 0.0
-        alt = self.z - fl
+        self.field_check(ox_, oy_, oz_)
+        alt = self.z - self.floor()
         if self.thrusting and alt < 90 and self.rng.random() < 0.9:
             self.dust(alt, fl)
         # firing
@@ -306,7 +338,12 @@ class Game:
                     L.dead = 1e-6
                     self.sparks(L.x, L.y, L.z, L.col)
                     break
+                if bs.field_e(*self.world.base, L.x, L.y, L.z) < 1:
+                    L.dead = 1e-6
+                    self.field_hit(L.x, L.y, L.z, quiet=True)
+                    break
         self.lasers = [L for L in self.lasers if L.t < 0.6 and L.dead < 0.08]
+        self.field_hits = [(x, y, z, a + dt) for x, y, z, a in self.field_hits if a + dt < 0.5]
         for p in self.parts:
             p.age += dt
             p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt
@@ -682,6 +719,7 @@ class Game:
             items.append((k_, 8, it))               # just after the top it lies on
         items.sort(key=lambda t: t[0])
         jet_rect = None
+        rover_drawn = False
         front = []
         watched = []      # aliens drawn so far: (surf, pos, rect, rocks drawn over them)
         for _, kind, obj in items:
@@ -706,19 +744,25 @@ class Game:
                 px, py = to_screen(rx, ry)
                 pos = (px - cx - ox, py - cy - oy)
                 if pos[0] < W and pos[0] + surf.get_width() > 0 and pos[1] < H and pos[1] + surf.get_height() > 0:
-                    sc.blit(surf, pos)
-                    if jet_rect is not None:
-                        front.append((surf, pos))
-                    rr = pygame.Rect(pos, surf.get_size())
-                    for w_ in watched:
-                        if rr.colliderect(w_[2]):
-                            w_[3].append((surf, pos))
+                    # lasers and sparks truly behind the rover go down first, so its body hides them
+                    self.draw_lasers(cx, cy, behind_rover=True)
+                    self.draw_parts(cx, cy, behind_rover=True)
+                    rover_drawn = True
+                    sc.blit(surf, pos)            # no x-ray outline: what's behind the rover is hidden
             elif kind == 6:
                 surf, ox, oy = self.base_spr.get(self.t)
                 px, py = to_screen(bx, by)
                 pos = (px - cx - ox, py - cy - oy)
+                fb, ff, fax, fay = self.base_spr.get_field(self.t)
+                fpos = (px - cx - fax, py - cy - fay)
+                field_on = fpos[0] < W and fpos[0] + fb.get_width() > 0 and fpos[1] < H and fpos[1] + fb.get_height() > 0
+                if field_on:                      # far half of the dome, behind the base
+                    sc.blit(fb, fpos, special_flags=pygame.BLEND_ADD)
                 if pos[0] < W and pos[0] + surf.get_width() > 0 and pos[1] < H and pos[1] + surf.get_height() > 0:
                     sc.blit(surf, pos)
+                if field_on:                      # near half, over the base
+                    sc.blit(ff, fpos, special_flags=pygame.BLEND_ADD)
+                if pos[0] < W and pos[0] + surf.get_width() > 0 and pos[1] < H and pos[1] + surf.get_height() > 0:
                     if jet_rect is not None:
                         front.append((surf, pos))
                     rr = pygame.Rect(pos, surf.get_size())
@@ -747,28 +791,17 @@ class Game:
         for surf, pos, rect, fr in watched:
             if fr:
                 self.silhouette(surf, pos, fr, (255, 235, 150, 80), (255, 240, 190))
-        self.draw_lasers(cx, cy)
-        for p in self.parts:
-            if p.kind != "dust":
-                px, py = to_screen(p.x, p.y, p.z)
-                k = 1 - p.age / p.life
-                if p.kind == "spark":
-                    pygame.draw.circle(sc, (255, int(200 * k + 55), int(120 * k)), (px - cx, py - cy), 1.5 + k)
-                elif p.kind == "frag":
-                    col, ang, spin = p.size
-                    ang += spin * p.age
-                    x0, y0 = px - cx, py - cy
-                    x1, y1 = x0 + math.cos(ang) * 7, y0 + math.sin(ang) * 7
-                    pygame.draw.line(sc, (40, 40, 40), (x0, y0 + 1), (x1, y1 + 1), 3)
-                    pygame.draw.line(sc, col, (x0, y0), (x1, y1), 2)
-                    pygame.draw.circle(sc, col, (x1, y1), 3)
-                    pygame.draw.circle(sc, (255, 255, 255), (x1 - 1, y1 - 1), 1)
-                elif p.kind == "ring":
-                    r = 8 + 60 * (1 - k)
-                    pygame.draw.ellipse(sc, p.size, (px - cx - r, py - cy - r * 0.6, r * 2, r * 1.2), max(1, int(4 * k)))
-                else:
-                    g = pygame.transform.smoothscale(self.glow, (int(70 * k + 10), int(70 * k + 10)))
-                    sc.blit(g, (px - cx - g.get_width() / 2, py - cy - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
+        self.draw_lasers(cx, cy, behind_rover=False)
+        self.draw_parts(cx, cy, behind_rover=False)
+        if not rover_drawn:                                 # rover off screen: nothing to hide behind
+            self.draw_lasers(cx, cy, behind_rover=True)
+            self.draw_parts(cx, cy, behind_rover=True)
+        for hx, hy, hz, ht in self.field_hits:           # force-field strikes flash over everything
+            i_ = int(ht / 0.04)
+            if self.base_spr.ripples and i_ < len(self.base_spr.ripples):
+                rs = self.base_spr.ripples[i_]
+                qx, qy = to_screen(hx, hy, hz)
+                sc.blit(rs, (qx - cx - rs.get_width() / 2, qy - cy - rs.get_height() / 2), special_flags=pygame.BLEND_ADD)
         self.hud()
 
     def beacon_dim(self, red):
@@ -890,9 +923,39 @@ class Game:
                 self.screen.set_at((int(x + spos[0]), int(y + spos[1])), edge_col)
         return True
 
-    def draw_lasers(self, cx, cy):
+    def behind_rover(self, x, y, z):
+        rx, ry = self.world.rover
+        return rv.relation(rx, ry, x, y, 0.05) < 0
+
+    def draw_parts(self, cx, cy, behind_rover):
+        sc = self.screen
+        for p in self.parts:
+            if p.kind != "dust" and self.behind_rover(p.x, p.y, p.z) == behind_rover:
+                px, py = to_screen(p.x, p.y, p.z)
+                k = 1 - p.age / p.life
+                if p.kind == "spark":
+                    pygame.draw.circle(sc, (255, int(200 * k + 55), int(120 * k)), (px - cx, py - cy), 1.5 + k)
+                elif p.kind == "frag":
+                    col, ang, spin = p.size
+                    ang += spin * p.age
+                    x0, y0 = px - cx, py - cy
+                    x1, y1 = x0 + math.cos(ang) * 7, y0 + math.sin(ang) * 7
+                    pygame.draw.line(sc, (40, 40, 40), (x0, y0 + 1), (x1, y1 + 1), 3)
+                    pygame.draw.line(sc, col, (x0, y0), (x1, y1), 2)
+                    pygame.draw.circle(sc, col, (x1, y1), 3)
+                    pygame.draw.circle(sc, (255, 255, 255), (x1 - 1, y1 - 1), 1)
+                elif p.kind == "ring":
+                    r = 8 + 60 * (1 - k)
+                    pygame.draw.ellipse(sc, p.size, (px - cx - r, py - cy - r * 0.6, r * 2, r * 1.2), max(1, int(4 * k)))
+                else:
+                    g = pygame.transform.smoothscale(self.glow, (int(70 * k + 10), int(70 * k + 10)))
+                    sc.blit(g, (px - cx - g.get_width() / 2, py - cy - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
+
+    def draw_lasers(self, cx, cy, behind_rover=False):
         sc = self.screen
         for L in self.lasers:
+            if self.behind_rover(L.x, L.y, L.z) != behind_rover:
+                continue
             ca, sa = math.cos(L.a), math.sin(L.a)
             back = min(2.6, math.hypot(L.x - L.x0, L.y - L.y0))
             x1, y1 = to_screen(L.x, L.y, L.z)
@@ -999,6 +1062,8 @@ SCENES = {
     "pop": [(0.25, {}), (1.2, {"fire": 1})],
     "base": [(0.05, {})],
     "base_far": [(0.05, {})],
+    "base_touch": [(0.5, {"up": 1})],
+    "base_zap": [(0.3, {}), (0.2, {"fire": 1})],
     "base_on": [(0.05, {})],
     "beacons": [(0.05, {})],
     "beacons_wide": [(0.05, {})],
@@ -1036,9 +1101,9 @@ def ring_of_aliens(game, n=7, rad=2.6, seed=3):
 
 
 def setup_scene(game, scene):
-    if scene in ("base", "base_far", "base_on", "beacons", "beacons_wide", "beacons_start"):
+    if scene in ("base", "base_far", "base_on", "base_touch", "base_zap", "beacons", "beacons_wide", "beacons_start"):
         bx, by = game.world.base
-        pos = {"base": (bx + 4.6, by + 1.2, -2.6), "base_far": (bx - 7.0, by + 6.0, 0.0),
+        pos = {"base": (bx + 4.6, by + 1.2, -2.6), "base_touch": (bx + 5.2, by + 1.6, -2.85), "base_zap": (bx + 7.5, by + 2.5, -2.82), "base_far": (bx - 7.0, by + 6.0, 0.0),
                "base_on": (bx + 1.6, by - 1.0, 2.4), "beacons": (bx - 14.0, by - 7.5, 0.5), "beacons_wide": (bx - 11.5, by + 12.0, -0.8), "beacons_start": (bx - 24.0, by - 19.0, 0.6)}[scene]
         game.x, game.y, game.a = pos
         if scene == "base_on":
