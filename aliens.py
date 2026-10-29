@@ -124,6 +124,8 @@ CHASE_RANGE = 7.0
 
 
 class Alien:
+    kind = "spore"
+
     def __init__(self, uid, x, y, variant, rng_seed):
         self.uid = uid
         self.x, self.y, self.z = x, y, 0.0
@@ -140,7 +142,7 @@ class Alien:
         self.floor = 0.0
         self.hit_cool = 0.0
 
-    def update(self, dt, world, jx, jy, events):
+    def update(self, dt, world, jx, jy, events, jz=0.0):
         self.spin += self.spin_rate * dt
         self.land_t += dt
         self.hit_cool -= dt
@@ -197,3 +199,194 @@ def chunk_aliens(ci, cj):
         out.append(((ci, cj, i), ci * wd.CHUNK + r.uniform(1, wd.CHUNK - 1), cj * wd.CHUNK + r.uniform(1, wd.CHUNK - 1),
                     r.choice(NAMES), r.randrange(1 << 30)))
     return out
+
+
+# ---------------------------------------------------------------- level 2 and 3 aliens
+# Painted sprites (assets/art/creeper.png, flyer.png: AI-painted from the spore alien as a
+# style reference, cut out of a magenta background by tools/cutout.py). Each faces the
+# viewer's lower right; it is mirrored when the creature heads the other way.
+import os
+ART = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "art")
+KINDS = {
+    #  kind       file           width px  points  stamina hit  splat colour     reach (tiles)  body (px up)
+    "spore":   (None,           None,     100,    8,           None,            0.55,          22),
+    "creeper": ("creeper.png",  78,       150,    12,          (200, 110, 40),  0.7,           14),
+    "flyer":   ("flyer.png",    104,      250,    15,          (70, 200, 220),  0.75,          16),
+}
+KIND_NAMES = {"spore": "Spore Hoppers", "creeper": "Rock Creepers", "flyer": "Void Rays"}
+
+
+class PaintedSprites:
+    """Loads the painted aliens once and hands out flipped / squashed copies (cached)."""
+
+    def __init__(self):
+        self.src, self.cache = {}, {}
+
+    def _load(self, kind):
+        if kind not in self.src:
+            fn, w = KINDS[kind][0], KINDS[kind][1]
+            img = pygame.image.load(os.path.join(ART, fn))
+            if pygame.display.get_surface():
+                img = img.convert_alpha()
+            h = int(img.get_height() * w / img.get_width())
+            self.src[kind] = pygame.transform.smoothscale(img, (w, h))
+        return self.src[kind]
+
+    def get(self, kind, flip, sy=1.0, sx=1.0):
+        """(surface, anchor x, anchor y); the anchor is the ground contact (creeper) or the
+        point under the body's centre (flyer)."""
+        qy, qx = round(sy * 20) / 20, round(sx * 20) / 20
+        k = (kind, flip, qy, qx)
+        hit = self.cache.get(k)
+        if hit:
+            return hit
+        s = self._load(kind)
+        if flip:
+            s = pygame.transform.flip(s, True, False)
+        if qy != 1 or qx != 1:
+            s = pygame.transform.smoothscale(s, (max(1, int(s.get_width() * qx)), max(1, int(s.get_height() * qy))))
+        w, h = s.get_size()
+        out = (s, w / 2, h - (2 if kind == "creeper" else h * 0.35))
+        self.cache[k] = out
+        return out
+
+
+class Creeper:
+    """Level 2: a low armoured crawler. It scuttles over the ground, can't climb the rover or
+    boulders (it turns away), and hunts Jetman when he's on or near the ground."""
+    kind = "creeper"
+
+    def __init__(self, uid, x, y, seed, speed=1.0):
+        self.uid, self.x, self.y, self.z = uid, x, y, 0.0
+        self.variant = "creeper"
+        self.rng = random.Random(seed)
+        self.heading = self.rng.uniform(0, math.tau)
+        self.speed = speed
+        self.vx = self.vy = self.vz = 0.0
+        self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
+        self.spin = self.rng.uniform(0, 10); self.spin_rate = 0.0
+        self.turn_t = 0.0
+
+    def update(self, dt, world, jx, jy, events, jz=0.0):
+        self.hit_cool -= dt
+        self.turn_t -= dt
+        self.spin += dt * 9 * self.speed
+        dx, dy = jx - self.x, jy - self.y
+        d = math.hypot(dx, dy)
+        hunting = d < 9.0 and jz - world.floor_at(jx, jy) < 90
+        if hunting and self.turn_t <= 0:
+            want = math.atan2(dy, dx)
+            diff = (want - self.heading + math.pi) % math.tau - math.pi
+            self.heading += max(-2.5 * dt, min(2.5 * dt, diff))
+        elif self.rng.random() < dt * 0.6:
+            self.heading += self.rng.uniform(-1.2, 1.2)
+        sp = (2.3 if hunting else 1.2) * self.speed
+        self.vx, self.vy = math.cos(self.heading) * sp, math.sin(self.heading) * sp
+        nx, ny = self.x + self.vx * dt, self.y + self.vy * dt
+        if world.blocked(nx, ny, 0.0, 0.3):
+            self.heading += self.rng.choice((1, -1)) * self.rng.uniform(1.6, 2.6)
+            self.turn_t = 0.8
+        else:
+            self.x, self.y = nx, ny
+        self.floor = world.floor_at(self.x, self.y)
+        self.z = self.floor
+
+    def flip(self):
+        sx_ = self.vx - self.vy            # screen-x direction of travel
+        return sx_ < 0
+
+    def squash(self):
+        return 1.0, 1.0 + 0.04 * math.sin(self.spin)
+
+
+class Flyer:
+    """Level 3: a ray that glides at altitude, then swoops at Jetman and climbs away."""
+    kind = "flyer"
+
+    def __init__(self, uid, x, y, seed, speed=1.0):
+        self.uid, self.x, self.y = uid, x, y
+        self.variant = "flyer"
+        self.rng = random.Random(seed)
+        self.heading = self.rng.uniform(0, math.tau)
+        self.speed = speed
+        self.cruise = self.rng.uniform(110, 190)
+        self.z = self.cruise
+        self.vx = self.vy = self.vz = 0.0
+        self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
+        self.spin = self.rng.uniform(0, 10); self.spin_rate = 0.0
+        self.mode, self.mode_t = "glide", self.rng.uniform(1, 4)
+
+    def update(self, dt, world, jx, jy, events, jz=0.0):
+        self.hit_cool -= dt
+        self.mode_t -= dt
+        self.spin += dt * (7 if self.mode == "swoop" else 4)
+        dx, dy = jx - self.x, jy - self.y
+        d = math.hypot(dx, dy)
+        if self.mode == "glide":
+            if self.rng.random() < dt * 0.5:
+                self.heading += self.rng.uniform(-1.0, 1.0)
+            if d < 11 and self.mode_t <= 0:
+                self.mode, self.mode_t = "swoop", 3.0
+            sp, tz = 2.4, self.cruise
+        elif self.mode == "swoop":
+            want = math.atan2(dy, dx)
+            diff = (want - self.heading + math.pi) % math.tau - math.pi
+            self.heading += max(-2.2 * dt, min(2.2 * dt, diff))
+            sp, tz = 4.6, jz + 30
+            if self.mode_t <= 0 or self.hit_cool > 0.3:
+                self.mode, self.mode_t = "climb", 1.8
+        else:
+            sp, tz = 3.4, self.cruise + 60
+            if self.mode_t <= 0:
+                self.mode, self.mode_t = "glide", self.rng.uniform(1.5, 3.5)
+        sp *= self.speed
+        self.vx, self.vy = math.cos(self.heading) * sp, math.sin(self.heading) * sp
+        self.x += self.vx * dt; self.y += self.vy * dt
+        self.z += (tz - self.z) * min(1.0, dt * 1.6)
+        self.floor = world.floor_at(self.x, self.y)
+        self.z = max(self.z, self.floor + 35)
+
+    def flip(self):
+        return (self.vx - self.vy) < 0
+
+    def squash(self):
+        return 1.0, 0.72 + 0.28 * abs(math.sin(self.spin))          # wing beat
+
+
+LEVEL_MIX = {1: [("spore", 1.0)], 2: [("creeper", 0.75), ("spore", 0.25)], 3: [("flyer", 0.6), ("creeper", 0.4)]}
+
+
+def level_kinds(level):
+    if level in LEVEL_MIX:
+        return LEVEL_MIX[level]
+    return [("spore", 0.3), ("creeper", 0.35), ("flyer", 0.35)]
+
+
+def level_new_kind(level):
+    """The alien type that is new on this level (for the level card)."""
+    return {1: "spore", 2: "creeper", 3: "flyer"}.get(level)
+
+
+def chunk_aliens_level(ci, cj, level):
+    """Deterministic spawn list for a chunk on a level: (uid, x, y, kind, variant, seed)."""
+    r = wd.chunk_rng(ci, cj, 21 + 97 * level)
+    mix = level_kinds(level)
+    out = []
+    for i in range(r.choice((0, 0, 1, 1, 1, 2, 2))):
+        u = r.random(); acc = 0.0; kind = mix[-1][0]
+        for k, w in mix:
+            acc += w
+            if u < acc:
+                kind = k; break
+        out.append(((level, ci, cj, i), ci * wd.CHUNK + r.uniform(1, wd.CHUNK - 1), cj * wd.CHUNK + r.uniform(1, wd.CHUNK - 1),
+                    kind, r.choice(NAMES), r.randrange(1 << 30)))
+    return out
+
+
+def make_alien(uid, x, y, kind, variant, seed, level):
+    speed = 1.0 + 0.15 * max(0, level - 3)
+    if kind == "creeper":
+        return Creeper(uid, x, y, seed, speed)
+    if kind == "flyer":
+        return Flyer(uid, x, y, seed, speed)
+    return Alien(uid, x, y, variant, seed)

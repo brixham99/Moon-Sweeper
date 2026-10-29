@@ -392,6 +392,37 @@ def shadow_sprite():
     return s, -x0, -y0
 
 
+_MASKS = {}
+
+
+def roof_mask():
+    """White, antialiased mask of the flat roof face (z = ROOF_Z) in screen px, anchored like
+    the sprite (returns surface, anchor x, anchor y). Only the real cabin roof, not the
+    landing forgiveness over the wheels."""
+    if "roof" not in _MASKS:
+        x0, x1 = RINGS[1][0], RINGS[2][0]
+        hw = RINGS[1][2] * SY
+        pts = [iso((x, y, ROOF_Z)) for x, y in ((x0, -hw), (x1, -hw), (x1, hw), (x0, hw))]
+        mnx = min(p[0] for p in pts) - 4; mny = min(p[1] for p in pts) - 4
+        W = int(max(p[0] for p in pts) - mnx) + 5; H = int(max(p[1] for p in pts) - mny) + 5
+        big = pygame.Surface((W * 2, H * 2), pygame.SRCALPHA); big.fill((255, 255, 255, 0))
+        pygame.draw.polygon(big, (255, 255, 255, 255), [((p[0] - mnx) * 2, (p[1] - mny) * 2) for p in pts])
+        _MASKS["roof"] = (pygame.transform.smoothscale(big, (W, H)), -mnx, -mny)
+    return _MASKS["roof"]
+
+
+def shadow_inverse():
+    """White mask, transparent where the rover's own ground shadow lies (no double darkening)."""
+    if "inv" not in _MASKS:
+        sh, sx, sy = shadow_sprite()
+        inv = pygame.Surface(sh.get_size(), pygame.SRCALPHA); inv.fill((255, 255, 255, 255))
+        a = pygame.surfarray.pixels_alpha(inv)
+        a[:] = 255 - np.clip(pygame.surfarray.array_alpha(sh).astype(np.int32) * 255 // 120, 0, 255)
+        del a
+        _MASKS["inv"] = (inv, sx, sy)
+    return _MASKS["inv"]
+
+
 def make_sprite(res):
     _, data, size, ax, ay = res
     s = pygame.image.frombytes(data, size, "RGBA")

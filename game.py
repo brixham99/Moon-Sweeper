@@ -29,6 +29,7 @@ import world as wd
 from world import CHUNK, CW, HH, HW, TH, TW, to_screen
 import jetman as jm
 import aliens as al
+from campaign import Campaign
 import rover as rv
 import base as bs
 import sfx as sx
@@ -107,8 +108,8 @@ class Particle:
         self.life, self.age, self.kind, self.size = life, 0.0, kind, size
 
 
-class Game:
-    def __init__(self, screen, seed=wd.SEED, start=START, sound_log=False):
+class Game(Campaign):
+    def __init__(self, screen, seed=wd.SEED, start=START, sound_log=False, online=False):
         self.sfx = sx.SFX(log=sound_log)
         self.screen = screen
         self.world = wd.World(seed, start)
@@ -158,6 +159,11 @@ class Game:
         self.splats = []            # goo decals: [x, y, colour, age]
         self.hit_t = 9.0
         self.pops = 0
+        self.campaign_init(online)
+
+    @staticmethod
+    def make_part(*a):
+        return Particle(*a)
 
     # ------------------------------------------------------------ helpers
     def collect_frames(self):
@@ -266,6 +272,7 @@ class Game:
 
     def update(self, dt, keys):
         self.t += dt
+        keys = self.campaign_keys(dt, keys)
         turn = keys.get("right", 0) - keys.get("left", 0)
         self.a += turn * TURN * dt
         move = keys.get("up", 0) - keys.get("down", 0) * 0.6
@@ -332,13 +339,14 @@ class Game:
                 hit = self.alien_hit(L)
                 if hit:
                     L.dead = 1e-6
+                    self.alien_killed(hit)
                     self.pop(hit)
                     break
                 if self.world.blocked(L.x, L.y, L.z - 6, 0.02) or L.z < self.floor(L.x, L.y) + 4:
                     L.dead = 1e-6
                     self.sparks(L.x, L.y, L.z, L.col)
                     break
-                if bs.field_e(*self.world.base, L.x, L.y, L.z) < 1:
+                if self.base_alive and bs.field_e(*self.world.base, L.x, L.y, L.z) < 1:
                     L.dead = 1e-6
                     self.field_hit(L.x, L.y, L.z, quiet=True)
                     break
@@ -355,9 +363,11 @@ class Game:
                 if p.z < 0:
                     p.z, p.vz = 0, -p.vz * 0.35; p.vx *= 0.6; p.vy *= 0.6
             else:
-                p.vz -= 300 * dt
+                if p.kind not in ("fire", "shock", "smoke"):
+                    p.vz -= 300 * dt
         self.parts = [p for p in self.parts if p.age < p.life]
         self.update_aliens(dt)
+        self.campaign_update(dt)
         # camera with look-ahead
         tx, ty = to_screen(self.x + self.vx * 0.35, self.y + self.vy * 0.35, self.z * 0.55)
         k = min(1.0, dt * 5)
@@ -395,13 +405,13 @@ class Game:
                 if k in self.spawned:
                     continue
                 self.spawned.add(k)
-                for uid, x, y, var, seed in al.chunk_aliens(*k):
+                for uid, x, y, kind, var, seed in al.chunk_aliens_level(*k, self.level):
                     if uid in self.killed or uid in self.aliens:
                         continue
                     if (x - self.x) ** 2 + (y - self.y) ** 2 < 9:      # never pop out on top of him
                         continue
                     if not self.world.blocked(x, y, 0, 0.35):
-                        self.aliens[uid] = al.Alien(uid, x, y, var, seed)
+                        self.aliens[uid] = al.make_alien(uid, x, y, kind, var, seed, self.level)
         # despawn far away; let far chunks spawn again later so the population stays steady
         for uid, a in list(self.aliens.items()):
             if abs(a.x - self.x) > 2.6 * CHUNK or abs(a.y - self.y) > 2.6 * CHUNK:
@@ -409,7 +419,7 @@ class Game:
         self.spawned = {k for k in self.spawned if abs(k[0] - fi) <= 2 and abs(k[1] - fj) <= 2}
         ev = []
         for a in self.aliens.values():
-            a.update(dt, self.world, self.x, self.y, ev)
+            a.update(dt, self.world, self.x, self.y, ev, self.z)
         for kind, a in ev:
             self.alien_sound("bounce", a)
             if (a.x - self.x) ** 2 + (a.y - self.y) ** 2 < 600:
@@ -418,13 +428,15 @@ class Game:
                     self.parts.append(Particle(a.x, a.y, a.floor + 1, math.cos(ang) * s, math.sin(ang) * s,
                                                self.rng.uniform(2, 10), self.rng.uniform(0.3, 0.6), "dust",
                                                self.rng.uniform(2, 3.5)))
-        # touching Jetman: hit flash and knockback (placeholder, no lives yet)
+        # touching Jetman: hit flash, knockback and a bite out of his stamina
         self.hit_t += dt
         for a in self.aliens.values():
             dx, dy = self.x - a.x, self.y - a.y
             d = math.hypot(dx, dy)
-            body_z = a.z + 22
-            if d < 0.55 and self.z - 10 < body_z < self.z + 100 and a.hit_cool <= 0:
+            kd = al.KINDS[a.kind]
+            body_z = a.z + kd[6]
+            if self.mode == "play" and d < kd[5] and self.z - 10 < body_z < self.z + 100 and a.hit_cool <= 0 and self.hit_t > 0.9:
+                self.hurt_stamina(kd[3])
                 nx, ny = (dx / d, dy / d) if d > 1e-3 else (1.0, 0.0)
                 self.vx += nx * 5.0; self.vy += ny * 5.0
                 self.vz = max(self.vz, 170.0); self.z += 1
@@ -455,7 +467,8 @@ class Game:
 
     def alien_hit(self, L):
         for a in self.aliens.values():
-            if (a.x - L.x) ** 2 + (a.y - L.y) ** 2 < 0.42 ** 2 and abs(L.z - (a.z + 24)) < 34:
+            # generous: a 0.75-tile radius and 55 px of height around the body (was 0.42 / 34)
+            if (a.x - L.x) ** 2 + (a.y - L.y) ** 2 < 0.75 ** 2 and abs(L.z - (a.z + al.KINDS[a.kind][6])) < 55:
                 return a
         return None
 
@@ -465,8 +478,11 @@ class Game:
         self.alien_sound("pop", a)
         self.killed.add(a.uid)
         self.pops += 1
-        stalk, club, _ = al.VARIANTS[a.variant]
-        z = a.z + 24
+        if a.kind == "spore":
+            stalk, club, _ = al.VARIANTS[a.variant]
+        else:
+            stalk = club = al.KINDS[a.kind][4]
+        z = a.z + al.KINDS[a.kind][6]
         for i in range(22):
             ang = self.rng.uniform(0, math.tau); s = self.rng.uniform(1.5, 4.5)
             p = Particle(a.x, a.y, z, math.cos(ang) * s, math.sin(ang) * s, self.rng.uniform(40, 220),
@@ -497,6 +513,10 @@ class Game:
         """Shadow on bare ground: draw now. On a raised top: return it for the depth sort."""
         sh, ox, oy = cast_shadow(surf, ax, ay)
         sx, sy, fl = self.shadow_at(x, y, z, fl)
+        rx, ry = self.world.rover
+        if fl > 0.5 and self.rover_spr and abs(fl - rv.ROOF_Z) < 1 and rv.in_footprint(rx, ry, sx, sy, 0.6):
+            self.rover_split_shadow(sh, ox, oy, x, y, z, sx, sy, raised)
+            return
         px, py = to_screen(sx, sy, fl)
         item = (sh, px - ox, py - oy)
         if fl > 0.5:
@@ -504,13 +524,41 @@ class Game:
         else:
             self.screen.blit(sh, (item[1] - self.cam_draw[0], item[2] - self.cam_draw[1]))
 
+    def rover_split_shadow(self, sh, ox, oy, x, y, z, sx, sy, raised):
+        """A shadow landing on the rover roof: the part over the real roof face stays up
+        there (clipped to it); the rest carries on down to the ground, further west, and
+        is hidden by the rover body / its own shadow where the roof blocked the sun."""
+        rx, ry = self.world.rover
+        rpx, rpy = to_screen(rx, ry)
+        w, h = sh.get_size()
+        # roof part, clipped to the roof face
+        px, py = to_screen(sx, sy, rv.ROOF_Z)
+        mask, mx, my = rv.roof_mask()
+        top = pygame.Surface((w, h), pygame.SRCALPHA); top.fill((255, 255, 255, 0))
+        top.blit(mask, (rpx - mx - (px - ox), rpy - my - (py - oy)))
+        top.blit(sh, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        raised.append((sx, sy, rv.ROOF_Z, (top, px - ox, py - oy)))
+        # ground part, minus where the rover already shades the ground
+        gx, gy = (x, y) if z < 0.5 else (x - SHADOW_W * z, y + SHADOW_W * z)
+        if z < 0.5:
+            return
+        px, py = to_screen(gx, gy, self.world.floor_at(gx, gy))
+        inv, ix, iy = rv.shadow_inverse()
+        low = pygame.Surface((w, h), pygame.SRCALPHA); low.fill((255, 255, 255, 255))
+        low.blit(inv, (rpx - ix - (px - ox), rpy - iy - (py - oy)))
+        low.blit(sh, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        self.screen.blit(low, (px - ox - self.cam_draw[0], py - oy - self.cam_draw[1]))
+
     def draw_alien_shadows(self, cx, cy, raised):
         for a in self.aliens.values():
             gx, gy = to_screen(a.x, a.y, a.floor)
             gx -= cx; gy -= cy
             if not (-120 - (a.z - a.floor) * SHADOW_K < gx < W + 60 and -60 < gy < H + 60):
                 continue
-            surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES)
+            if a.kind == "spore":
+                surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES)
+            else:
+                surf, ax, ay = self.paint.get(a.kind, a.flip(), *a.squash())
             self.queue_shadow(surf, ax, ay, a.x, a.y, a.z, raised, a.floor)
 
     def draw_splats(self, cx, cy):
@@ -531,7 +579,10 @@ class Game:
         if not (-60 < px < W + 60 and -90 < py < H + 40):
             return None
         sx, sy = a.squash()
-        surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES, sx, sy)
+        if a.kind == "spore":
+            surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES, sx, sy)
+        else:
+            surf, ax, ay = self.paint.get(a.kind, a.flip(), sx, sy)
         pos = (px - ax, py - ay + (2 if a.land_t < 0.15 else 0))
         self.screen.blit(surf, pos)
         return surf, pos
@@ -640,6 +691,9 @@ class Game:
         self.stream()
         self.collect_frames()
         cx, cy = self.cam[0] - W / 2, self.cam[1] - H / 2
+        if self.shake > 0:
+            k = self.shake ** 2 * 14
+            cx += self.rng.uniform(-k, k); cy += self.rng.uniform(-k, k)
         vis = self.visible_chunks(cx, cy)
         for (ci, cj) in vis:
             sx, sy = to_screen(ci * CHUNK, cj * CHUNK)
@@ -692,6 +746,9 @@ class Game:
             items.append((RK, 5, None))
         if self.base_spr.ready():
             items.append((BK, 6, None))
+        if self.bomb.state in ("ground", "falling"):
+            b_ = self.bomb
+            items.append((key(b_.x, b_.y, b_.x + b_.y, 0.2), 9, None))
         for b in beacons:
             items.append((key(b[0], b[1], b[0] + b[1], 0.15), 7, b))
         for p in self.parts:
@@ -777,6 +834,8 @@ class Game:
                 pulse = 0.8 + 0.2 * math.sin(self.t * 4.0 + x * 0.7 + y * 1.3)
                 g = glow if pulse > 0.9 else self.beacon_dim(red)
                 sc.blit(g, (px - cx - 36, py - cy - ay + 5 - 36), special_flags=pygame.BLEND_ADD)
+            elif kind == 9:
+                self.draw_bomb_obj(cx, cy)
             elif kind == 8:
                 sc.blit(obj[0], (obj[1] - cx, obj[2] - cy))
             elif kind == 1:
@@ -802,7 +861,7 @@ class Game:
                 rs = self.base_spr.ripples[i_]
                 qx, qy = to_screen(hx, hy, hz)
                 sc.blit(rs, (qx - cx - rs.get_width() / 2, qy - cy - rs.get_height() / 2), special_flags=pygame.BLEND_ADD)
-        self.hud()
+        self.campaign_hud()
 
     def beacon_dim(self, red):
         k = "red_dim" if red else "green_dim"
@@ -858,6 +917,10 @@ class Game:
         pack_behind = (fvec[0] + fvec[1]) > 0.1          # facing the viewer: pack hidden behind him
         if self.thrusting and pack_behind:
             self.draw_flames(bx, by, noz)
+        self.draw_carried_bomb(bx, by)
+        if self.mode == "dying" and int(self.mode_t * 10) % 2 == 0:
+            self.jet_draw = (surf, (bx - ax, by - ay))
+            return pygame.Rect(bx - ax, by - ay, surf.get_width(), surf.get_height())
         sc.blit(surf, (bx - ax, by - ay))
         if self.hit_t < 0.35 and int(self.hit_t * 20) % 2 == 0:          # hit flash
             fl_ = surf.copy()
@@ -944,6 +1007,23 @@ class Game:
                     pygame.draw.line(sc, col, (x0, y0), (x1, y1), 2)
                     pygame.draw.circle(sc, col, (x1, y1), 3)
                     pygame.draw.circle(sc, (255, 255, 255), (x1 - 1, y1 - 1), 1)
+                elif p.kind == "fire":
+                    r = int(p.size * (0.45 + 0.55 * (1 - k)))
+                    g = pygame.transform.smoothscale(self.glow, (r * 2, int(r * 1.6)))
+                    g.fill((255, int(120 + 120 * k), int(60 * k), 255), special_flags=pygame.BLEND_RGBA_MULT)
+                    if k < 1:
+                        g.fill((int(255 * k),) * 3 + (255,), special_flags=pygame.BLEND_RGBA_MULT)
+                    sc.blit(g, (px - cx - r, py - cy - r * 0.8), special_flags=pygame.BLEND_ADD)
+                elif p.kind == "smoke":
+                    r = int(p.size * (0.6 + 0.8 * (1 - k)))
+                    s_ = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+                    al_ = 46 * min(1.0, k * 2.5) * min(1.0, p.age * 3)
+                    for f_ in (1.0, 0.78, 0.55):             # soft edged puff
+                        pygame.draw.circle(s_, (52, 50, 48, int(al_)), (r, r), int(r * f_))
+                    sc.blit(s_, (px - cx - r, py - cy - r))
+                elif p.kind == "shock":
+                    r = p.size * (1 - k) + 10
+                    pygame.draw.ellipse(sc, (255, int(180 * k + 60), int(120 * k)), (px - cx - r, py - cy - r * 0.5, r * 2, r), max(1, int(6 * k)))
                 elif p.kind == "ring":
                     r = 8 + 60 * (1 - k)
                     pygame.draw.ellipse(sc, p.size, (px - cx - r, py - cy - r * 0.6, r * 2, r * 1.2), max(1, int(4 * k)))
@@ -1278,7 +1358,7 @@ def main():
         pygame.image.save(screen, os.path.join(outdir, name + ".png"))
         print("saved", name, f"at {game.x:.1f},{game.y:.1f} alt {game.z:.0f} hidden={game.hidden}")
         return
-    game = Game(screen)
+    game = Game(screen, online=not headless)
     if "--loadshot" in sys.argv:          # screenshot of the loading screen part-way through
         while True:
             r, n, m = game.load_step()
@@ -1292,6 +1372,7 @@ def main():
     if "--bench" in sys.argv:
         # fly fast in a straight line so new chunks stream in all the way
         game.a = 0.3
+        game.infinite = True
         game.wait_ready()
         times = []
         n = 1200
@@ -1307,44 +1388,39 @@ def main():
               f"cached now {len(game.world.ground)}")
         return
     clock = pygame.time.Clock()
-    # loading screen: pump events every frame, never block, until all is ready
+    # title screen while the world loads in the background (never blocks); Enter starts
+    game.mode, game.title_t = "title", 0.0
+    game.music(True)
     t_start = time.time()
-    while True:
-        clock.tick(FPS)
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
-                pygame.quit(); return
-            if e.type == pygame.KEYDOWN and e.key == pygame.K_f:
-                pygame.display.toggle_fullscreen()
-        ready, total, msg = game.load_step()
-        game.draw_loading(ready, total, msg)
-        pygame.display.flip()
-        if ready >= total:
-            break
-    print(f"ready after {time.time() - t_start:.1f} s", flush=True)
-    # brief fade in from black, then play
-    veil = pygame.Surface((W, H)); veil.fill(BLACK)
-    for i in range(24):
-        clock.tick(FPS)
-        pygame.event.pump()
-        game.draw()
-        veil.set_alpha(int(255 * (1 - (i + 1) / 24)))
-        game.screen.blit(veil, (0, 0))
-        pygame.display.flip()
-    pygame.event.clear()
-    clock.tick(FPS)
+    total = 1
     while True:
         dt = min(clock.tick(FPS) / 1000.0, 1 / 20)
         for e in pygame.event.get():
-            if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
+            if e.type == pygame.QUIT:
                 pygame.quit(); return
-            if e.type == pygame.KEYDOWN and e.key == pygame.K_f:
-                pygame.display.toggle_fullscreen()
-        k = pygame.key.get_pressed()
-        keys = {"left": k[pygame.K_LEFT], "right": k[pygame.K_RIGHT], "up": k[pygame.K_UP], "down": k[pygame.K_DOWN],
-                "jet": k[pygame.K_SPACE], "fire": k[pygame.K_LCTRL] or k[pygame.K_RCTRL] or k[pygame.K_z]}
-        game.update(dt, keys)
-        game.draw()
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_f and not (game.mode == "over" and game.entry_active):
+                    pygame.display.toggle_fullscreen()
+                    continue
+                if game.handle_key(e) == "quit":
+                    pygame.quit(); return
+            elif e.type == pygame.TEXTINPUT:
+                game.handle_text(e.text)
+        ready = total
+        if not game.loaded:
+            ready, total, msg = game.load_step()
+            if ready >= total:
+                game.loaded = True
+                print(f"ready after {time.time() - t_start:.1f} s", flush=True)
+        if game.mode == "title":
+            game.title_t += dt
+            game.draw_title(game.loaded, min(1.0, ready / max(1, total)))
+        else:
+            k = pygame.key.get_pressed()
+            keys = {"left": k[pygame.K_LEFT], "right": k[pygame.K_RIGHT], "up": k[pygame.K_UP], "down": k[pygame.K_DOWN],
+                    "jet": k[pygame.K_SPACE], "fire": k[pygame.K_LCTRL] or k[pygame.K_RCTRL] or k[pygame.K_z]}
+            game.update(dt, keys)
+            game.draw()
         game.fps = clock.get_fps() or game.fps
         pygame.display.flip()
 

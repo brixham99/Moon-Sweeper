@@ -291,11 +291,45 @@ class World:
             for di in (-1, 0, 1):
                 for dj in (-1, 0, 1):
                     for rk in self._raw(ci + di, cj + dj)[1]:
-                        if int(math.floor(rk.x / CHUNK)) == ci and int(math.floor(rk.y / CHUNK)) == cj:
+                        if int(math.floor(rk.x / CHUNK)) == ci and int(math.floor(rk.y / CHUNK)) == cj \
+                                and not bs.in_footprint(self.base[0], self.base[1], rk.x, rk.y, 1.6):
                             out.append(rk)
             out.sort(key=lambda q: q.x + q.y)
             self.rocks[k] = out
         return self.rocks[k]
+
+    # ------------------------------------------------------------ moving the base (new level)
+    BASE_GONE = (1.0e6, 1.0e6)
+
+    def set_base(self, pos):
+        """Put the Alien Missile Base somewhere else (or far away while it's destroyed).
+        Boulders under its new footprint are cleared."""
+        self.base = pos
+        self.rocks = {}
+        self.__dict__.pop("_floor_cache", None)
+
+    def base_site_ok(self, x, y):
+        """A clear spot for the base: no crater near the pad, no beacon inside the field,
+        well away from the rover."""
+        if (x - self.rover[0]) ** 2 + (y - self.rover[1]) ** 2 < 15 ** 2 or not beacon_clear(x, y, 6.0):
+            return False
+        ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for (cx, cy, cr, _) in self._raw(ci + di, cj + dj)[0]:
+                    if (cx - x) ** 2 + (cy - y) ** 2 < (cr + 5.5) ** 2:
+                        return False
+        return True
+
+    def pick_base_site(self, rng, dmin, dmax):
+        """A random clear spot dmin..dmax tiles from the rover (any direction)."""
+        rx, ry = self.rover
+        for _ in range(400):
+            a = rng.uniform(0, math.tau); d = rng.uniform(dmin, dmax)
+            x, y = rx + math.cos(a) * d, ry + math.sin(a) * d
+            if self.base_site_ok(x, y):
+                return (round(x * 2) / 2, round(y * 2) / 2)
+        return (rx + dmin, ry + 6.0)
 
     def blocked(self, x, y, z, rad=0.3):
         if z < rv.height_at(self.rover[0], self.rover[1], x, y, rad) * 0.95:
@@ -323,6 +357,18 @@ class World:
         return out
 
     def floor_at(self, x, y):
+        """Height of whatever is underfoot. Memoised on a 1/16-tile grid: aliens and
+        particles ask this every frame and the answer only changes when the base moves."""
+        k = (int(x * 16.0 + 0.5) if x >= 0 else -int(-x * 16.0 + 0.5), int(y * 16.0 + 0.5) if y >= 0 else -int(-y * 16.0 + 0.5))
+        fc = self.__dict__.setdefault("_floor_cache", {})
+        f = fc.get(k)
+        if f is None:
+            if len(fc) > 60000:
+                fc.clear()
+            f = fc[k] = self._floor_at(k[0] / 16.0, k[1] / 16.0)
+        return f
+
+    def _floor_at(self, x, y):
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
         f = max(rv.height_at(self.rover[0], self.rover[1], x, y, 0.3), bs.height_at(self.base[0], self.base[1], x, y))
         for di in (-1, 0, 1):

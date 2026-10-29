@@ -102,8 +102,49 @@ def pop():
     return _norm((chirp + splat) * _env(len(t), 0.001, 0.06), 0.8)
 
 
-BUILDERS = {"thrust": thrust, "phaser": phaser, "hurt": hurt, "bounce": bounce, "spin": spin, "pop": pop}
-GAIN = {"thrust": 0.55, "phaser": 0.45, "hurt": 0.9, "bounce": 0.3, "spin": 0.18, "pop": 0.48}   # alien sounds at 60%
+def boom():
+    """The base going up: a sub-bass drop, a crackling roar and a long rumbling tail."""
+    t = _t(2.8)
+    n = len(t)
+    noise = rng.standard_normal(n)
+    sub = np.sin(2 * np.pi * np.cumsum(30 + 90 * np.exp(-t * 5)) / RATE) * np.exp(-t * 1.6)
+    roar = _lowpass(noise, 300 + 3000 * np.exp(-t * 4)) * np.exp(-t * 1.4) * 3
+    crackle = (rng.random(n) < 0.002 * np.exp(-t * 1.5)) * rng.standard_normal(n) * 6
+    x = np.tanh(1.6 * (sub * 1.4 + roar + crackle))
+    return _norm(x * _env(n, 0.002, 1.2), 0.95)
+
+
+def pickup():
+    """Bomb clipped on: a two-note rising blip."""
+    t = _t(0.22)
+    f = np.where(t < 0.09, 660, 990)
+    x = np.sign(np.sin(2 * np.pi * np.cumsum(f) / RATE)) * 0.5 + np.sin(2 * np.pi * np.cumsum(f * 2) / RATE) * 0.3
+    return _norm(x * _env(len(t), 0.002, 0.08), 0.55)
+
+
+def drop():
+    """Bomb away: a falling whistle."""
+    t = _t(0.7)
+    f = 1500 * np.exp(-t * 1.6) + 250
+    x = np.sin(2 * np.pi * np.cumsum(f) / RATE) * (1 + 0.2 * np.sin(2 * np.pi * 9 * t))
+    return _norm(x * _env(len(t), 0.01, 0.25), 0.5)
+
+
+def levelup():
+    """Level complete: a quick major arpeggio fanfare."""
+    notes = [523.25, 659.25, 783.99, 1046.5, 783.99, 1046.5]
+    parts = []
+    for i, f in enumerate(notes):
+        t = _t(0.11 if i < 5 else 0.5)
+        x = np.sign(np.sin(2 * np.pi * f * t)) * 0.4 + np.sin(2 * np.pi * f * 2 * t) * 0.25
+        parts.append(x * _env(len(t), 0.003, 0.05 if i < 5 else 0.35))
+    return _norm(np.concatenate(parts), 0.6)
+
+
+BUILDERS = {"thrust": thrust, "phaser": phaser, "hurt": hurt, "bounce": bounce, "spin": spin, "pop": pop,
+            "boom": boom, "pickup": pickup, "drop": drop, "levelup": levelup}
+GAIN = {"thrust": 0.55, "phaser": 0.45, "hurt": 0.9, "bounce": 0.3, "spin": 0.18, "pop": 0.48,
+        "boom": 1.0, "pickup": 0.5, "drop": 0.45, "levelup": 0.55}   # alien sounds at 60%
 
 
 def build_all():
