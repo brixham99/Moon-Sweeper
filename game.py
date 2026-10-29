@@ -558,7 +558,7 @@ class Game(Campaign):
             if a.kind == "spore":
                 surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES)
             else:
-                surf, ax, ay = self.paint.get(a.kind, a.flip(), *a.squash())
+                surf, ax, ay = self.paint.get(a.kind, a.flip(), *a.squash(), frame=a.frame() if a.kind == "creeper" else 0)
             self.queue_shadow(surf, ax, ay, a.x, a.y, a.z, raised, a.floor)
 
     def draw_splats(self, cx, cy):
@@ -582,7 +582,7 @@ class Game(Campaign):
         if a.kind == "spore":
             surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES, sx, sy)
         else:
-            surf, ax, ay = self.paint.get(a.kind, a.flip(), sx, sy)
+            surf, ax, ay = self.paint.get(a.kind, a.flip(), sx, sy, a.frame() if a.kind == "creeper" else 0)
         pos = (px - ax, py - ay + (2 if a.land_t < 0.15 else 0))
         self.screen.blit(surf, pos)
         return surf, pos
@@ -917,7 +917,7 @@ class Game(Campaign):
         pack_behind = (fvec[0] + fvec[1]) > 0.1          # facing the viewer: pack hidden behind him
         if self.thrusting and pack_behind:
             self.draw_flames(bx, by, noz)
-        self.draw_carried_bomb(bx, by)
+        self.draw_carried_bomb(bx, by, "back")
         if self.mode == "dying" and int(self.mode_t * 10) % 2 == 0:
             self.jet_draw = (surf, (bx - ax, by - ay))
             return pygame.Rect(bx - ax, by - ay, surf.get_width(), surf.get_height())
@@ -928,6 +928,7 @@ class Game(Campaign):
             sc.blit(fl_, (bx - ax, by - ay))
         if self.thrusting and not pack_behind:
             self.draw_flames(bx, by, noz)
+        self.draw_carried_bomb(bx, by, "front")
         if self.fire_t < 0.06:
             mx, my = bx + muz[0], by + muz[1]
             g = pygame.transform.smoothscale(self.glow, (54, 54))

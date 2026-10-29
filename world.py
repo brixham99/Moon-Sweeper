@@ -69,6 +69,9 @@ def value_noise(x, y, cell, salt):
     return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy
 
 
+BLAST_REACH = 2.7            # a blast crater's rays reach 2.7 radii out
+
+
 def ground_pixels(ci, cj, craters, seed=None, R=2):
     """Pixels for one chunk's ground. Pure function of (seed, ci, cj): safe in a worker thread.
     Heights and shading are worked out at 1/R resolution, then grain is added at full size."""
@@ -84,10 +87,11 @@ def ground_pixels(ci, cj, craters, seed=None, R=2):
     v = np.broadcast_to((py / HH - px / HW) / 2 + cj * CHUNK, (w, h))
     hgt = value_noise(u, v, 9.0, 1) * 7 + value_noise(u, v, 2.2, 2) * 2.2
     alb = 124 + value_noise(u, v, 26.0, 3) * 20 + value_noise(u, v, 6.0, 4) * 8
-    for (cx, cy, cr, age) in sorted(craters, key=lambda c: -c[2]):
+    # big (old) first, younger smaller ones carve into them; blast craters (age < 0) come last
+    for (cx, cy, cr, age) in sorted(craters, key=lambda c: (c[3] < 0, -c[2])):
         sx = ((cx - ci * CHUNK) - (cy - cj * CHUNK)) * HW + CW / 2
         sy = ((cx - ci * CHUNK) + (cy - cj * CHUNK)) * HH
-        ext = cr * 1.9 * 1.42
+        ext = cr * (BLAST_REACH if age < 0 else 1.9) * 1.42     # a screen box holding the circle d < 1.9 (blasts: d < BLAST_REACH)
         x_lo = int(max(0, (sx - ext * HW) / R + M)); x_hi = int(min(w, (sx + ext * HW) / R + M + 1))
         y_lo = int(max(0, (sy - ext * HH) / R + M)); y_hi = int(min(h, (sy + ext * HH) / R + M + 1))
         if x_lo >= x_hi or y_lo >= y_hi:
@@ -103,6 +107,18 @@ def ground_pixels(ci, cj, craters, seed=None, R=2):
         base = float(hh[ring].mean()) if ring.any() else float(hh.mean())
         wgt = np.clip((1.1 - d) / 0.25, 0, 1)      # carve: older relief inside the bowl is erased
         hgt[x_lo:x_hi, y_lo:y_hi] = hh * (1 - wgt) + base * wgt + prof
+        if age < 0:                              # a blast crater: scorched bowl and rim, bright rays beyond
+            ang = np.arctan2(vv - cy, uu - cx)
+            k = (int(cx * 7.3 + cy * 3.1) % 97) * 0.37
+            rays = ((0.5 + 0.5 * np.sin(ang * 9 + k)) ** 6 + (0.5 + 0.5 * np.sin(ang * 14 + 2.1 * k)) ** 8
+                    + 0.6 * (0.5 + 0.5 * np.sin(ang * 23 + 3.3 * k)) ** 10)
+            out_ = d >= 1.0
+            mott = value_noise(uu, vv, 1.3, 11) * 10      # patchy soot
+            scorch = np.where(inside, -46 + 14 * d ** 3 + mott, (-48 + mott) * np.exp(-((d - 1.0) / 0.3) ** 2))
+            ejecta = np.where(out_, (10 + 24 * rays) * np.exp(-np.maximum(d - 1.3, 0) / 0.7)
+                              * np.clip((d - 1.12) / 0.25, 0, 1) * np.clip((BLAST_REACH - 0.05 - d) / 0.7, 0, 1), 0)
+            alb[x_lo:x_hi, y_lo:y_hi] += scorch + ejecta
+            continue
         if cr > 2.6:
             hgt[x_lo:x_hi, y_lo:y_hi] += cr * 3.0 * np.exp(-(d / 0.13) ** 2)
         bright = (1 - age) ** 2 * 22             # young craters: bright ejecta, darker floor
@@ -200,7 +216,7 @@ class Rock:
         self.key = seed
 
 
-BEACON_GAP = 26.0           # beacons stand on a regular grid, every 26 tiles (at most two on screen), for ever
+BEACON_GAP = 14.0           # beacons stand on a regular grid, every 14 tiles (about four on screen), for ever
 
 
 def beacon_clear(x, y, d):
@@ -217,6 +233,7 @@ class World:
         self.rover = (start[0] + 0.4, start[1] - 4.8)    # parked just behind the landing spot, nose south-east
         self.base = (start[0] + 27.0, start[1] + 19.0)  # the Alien Missile Base, ~33 tiles away to the south
         self.raw = {}        # (ci, cj) -> (craters, rocks) born in that chunk
+        self.blasts = []     # giant craters left where bases were blown up: (x, y, radius, -1)
         self.rocks = {}      # (ci, cj) -> rocks sitting in that chunk
         self.ground = {}     # (ci, cj) -> Surface
         self.sprites = {}    # rock seed -> (Surface, ox, oy)
@@ -292,11 +309,65 @@ class World:
                 for dj in (-1, 0, 1):
                     for rk in self._raw(ci + di, cj + dj)[1]:
                         if int(math.floor(rk.x / CHUNK)) == ci and int(math.floor(rk.y / CHUNK)) == cj \
-                                and not bs.in_footprint(self.base[0], self.base[1], rk.x, rk.y, 1.6):
+                                and not bs.in_footprint(self.base[0], self.base[1], rk.x, rk.y, 1.6) \
+                                and not self.in_blast(rk.x, rk.y, 1.12):
                             out.append(rk)
             out.sort(key=lambda q: q.x + q.y)
             self.rocks[k] = out
         return self.rocks[k]
+
+    # ------------------------------------------------------------ blast craters
+    BLAST_R = 6.5                                 # tiles; the biggest natural craters are ~4
+
+    def in_blast(self, x, y, k=1.0):
+        return any((x - bx) ** 2 + (y - by) ** 2 < (br * k) ** 2 for (bx, by, br, _) in self.blasts)
+
+    def crater_list(self, ci, cj):
+        """Every crater that can touch chunk (ci, cj): natural ones born in it or its
+        neighbours, minus any swallowed by a blast, plus the blast craters that reach it."""
+        crs = []
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                crs += self._raw(ci + di, cj + dj)[0]
+        if self.blasts:
+            crs = [c for c in crs if not self.in_blast(c[0], c[1], 0.9)]
+            x0, y0 = ci * CHUNK, cj * CHUNK
+            for b in self.blasts:
+                ext = b[2] * BLAST_REACH * 1.42
+                if x0 - ext < b[0] < x0 + CHUNK + ext and y0 - ext < b[1] < y0 + CHUNK + ext:
+                    crs.append(b)
+        return crs
+
+    def add_blast(self, x, y, r=None):
+        """Leave a giant scorched crater at (x, y). Boulders inside it are gone; the ground
+        chunks it touches are rebuilt in the background (the old ones stay on screen until
+        the new ones are ready, under the fireball and smoke)."""
+        r = r or self.BLAST_R
+        self.blasts.append((x, y, r, -1.0))
+        self.rocks = {}
+        self.__dict__.pop("_floor_cache", None)
+        ext = r * BLAST_REACH * 1.42
+        with self.lock:
+            for k in list(self.ground) + list(self.pending) + list(self.done):
+                x0, y0 = k[0] * CHUNK, k[1] * CHUNK
+                if x0 - ext < x < x0 + CHUNK + ext and y0 - ext < y < y0 + CHUNK + ext:
+                    self.done.pop(k, None); self.pending.pop(k, None)
+                    self.queue[k] = None             # filled in below (needs _raw, outside the lock)
+        for k in [k for k, v in self.queue.items() if v is None]:
+            crs = self.crater_list(*k)
+            with self.lock:
+                self.queue[k] = crs
+        self.wake.set()
+
+    def clear_blasts(self):
+        """New game: the craters of the last one are forgotten."""
+        if self.blasts:
+            self.blasts = []
+            self.rocks = {}
+            self.__dict__.pop("_floor_cache", None)
+            with self.lock:
+                self.queue.clear(); self.done.clear(); self.pending.clear()
+            self.ground = {}
 
     # ------------------------------------------------------------ moving the base (new level)
     BASE_GONE = (1.0e6, 1.0e6)
@@ -313,6 +384,8 @@ class World:
         well away from the rover."""
         if (x - self.rover[0]) ** 2 + (y - self.rover[1]) ** 2 < 15 ** 2 or not beacon_clear(x, y, 6.0):
             return False
+        if any((x - bx) ** 2 + (y - by) ** 2 < (br * BLAST_REACH + 5.0) ** 2 for (bx, by, br, _) in self.blasts):
+            return False                              # not in (or on the rays of) an old blast crater
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
@@ -387,10 +460,7 @@ class World:
         k = (ci, cj)
         if k in self.ground or k in self.pending or k in self.queue:
             return
-        crs = []
-        for di in (-1, 0, 1):
-            for dj in (-1, 0, 1):
-                crs += self._raw(ci + di, cj + dj)[0]
+        crs = self.crater_list(ci, cj)
         with self.lock:
             self.queue[k] = crs
         self.wake.set()
@@ -449,11 +519,7 @@ class World:
             if not wait:
                 self.request_ground(ci, cj)
                 return None
-            crs = []
-            for di in (-1, 0, 1):
-                for dj in (-1, 0, 1):
-                    crs += self._raw(ci + di, cj + dj)[0]
-            res = ground_pixels(ci, cj, crs)
+            res = ground_pixels(ci, cj, self.crater_list(ci, cj))
         self._finish(k, res)
         return self.ground[k]
 

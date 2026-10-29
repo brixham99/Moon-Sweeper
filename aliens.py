@@ -213,6 +213,8 @@ KINDS = {
     "creeper": ("creeper.png",  78,       150,    12,          (200, 110, 40),  0.7,           14),
     "flyer":   ("flyer.png",    104,      250,    15,          (70, 200, 220),  0.75,          16),
 }
+CREEPER_SHEET, CREEPER_FRAMES, CREEPER_PAD = "creeper_walk.png", 8, 6
+CREEPER_STRIDE = 0.42        # tiles travelled per full scuttle cycle (keeps the feet from sliding)
 KIND_NAMES = {"spore": "Spore Hoppers", "creeper": "Rock Creepers", "flyer": "Void Rays"}
 
 
@@ -221,32 +223,46 @@ class PaintedSprites:
 
     def __init__(self):
         self.src, self.cache = {}, {}
+        self.pad = 0.0
 
-    def _load(self, kind):
-        if kind not in self.src:
+    def _load(self, kind, frame=0):
+        if (kind, frame) not in self.src:
             fn, w = KINDS[kind][0], KINDS[kind][1]
-            img = pygame.image.load(os.path.join(ART, fn))
-            if pygame.display.get_surface():
-                img = img.convert_alpha()
-            h = int(img.get_height() * w / img.get_width())
-            self.src[kind] = pygame.transform.smoothscale(img, (w, h))
-        return self.src[kind]
+            if kind == "creeper":                 # the scuttle cycle (tools/creeper_frames.py)
+                sheet = pygame.image.load(os.path.join(ART, CREEPER_SHEET))
+                fw = sheet.get_width() // CREEPER_FRAMES
+                k = w / (fw - 2 * CREEPER_PAD)    # same scale as the plain sprite
+                for i in range(CREEPER_FRAMES):
+                    img = sheet.subsurface((i * fw, 0, fw, sheet.get_height())).copy()
+                    if pygame.display.get_surface():
+                        img = img.convert_alpha()
+                    self.src[(kind, i)] = pygame.transform.smoothscale(
+                        img, (round(fw * k), round(img.get_height() * k)))
+                self.pad = CREEPER_PAD * k
+            else:
+                img = pygame.image.load(os.path.join(ART, fn))
+                if pygame.display.get_surface():
+                    img = img.convert_alpha()
+                h = int(img.get_height() * w / img.get_width())
+                self.src[(kind, frame)] = pygame.transform.smoothscale(img, (w, h))
+        return self.src[(kind, frame)]
 
-    def get(self, kind, flip, sy=1.0, sx=1.0):
+    def get(self, kind, flip, sy=1.0, sx=1.0, frame=0):
         """(surface, anchor x, anchor y); the anchor is the ground contact (creeper) or the
         point under the body's centre (flyer)."""
         qy, qx = round(sy * 20) / 20, round(sx * 20) / 20
-        k = (kind, flip, qy, qx)
+        frame = frame % CREEPER_FRAMES if kind == "creeper" else 0
+        k = (kind, flip, qy, qx, frame)
         hit = self.cache.get(k)
         if hit:
             return hit
-        s = self._load(kind)
+        s = self._load(kind, frame)
         if flip:
             s = pygame.transform.flip(s, True, False)
         if qy != 1 or qx != 1:
             s = pygame.transform.smoothscale(s, (max(1, int(s.get_width() * qx)), max(1, int(s.get_height() * qy))))
         w, h = s.get_size()
-        out = (s, w / 2, h - (2 if kind == "creeper" else h * 0.35))
+        out = (s, w / 2, h - (2 + self.pad * qy if kind == "creeper" else h * 0.35))
         self.cache[k] = out
         return out
 
@@ -266,6 +282,10 @@ class Creeper:
         self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
         self.spin = self.rng.uniform(0, 10); self.spin_rate = 0.0
         self.turn_t = 0.0
+        self.gait = self.rng.random()
+
+    def frame(self):
+        return int(self.gait * CREEPER_FRAMES) % CREEPER_FRAMES
 
     def update(self, dt, world, jx, jy, events, jz=0.0):
         self.hit_cool -= dt
@@ -288,6 +308,7 @@ class Creeper:
             self.turn_t = 0.8
         else:
             self.x, self.y = nx, ny
+            self.gait += sp * dt / CREEPER_STRIDE     # legs keep pace with the ground
         self.floor = world.floor_at(self.x, self.y)
         self.z = self.floor
 

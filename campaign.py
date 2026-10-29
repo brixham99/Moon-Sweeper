@@ -85,6 +85,7 @@ class Campaign:
         self.paint = al.PaintedSprites()
         img = pygame.image.load(BOMB_ART)
         self.bomb_img = img.convert_alpha() if pygame.display.get_surface() else img
+        self.bomb_held = pygame.transform.smoothscale(self.bomb_img, (round(img.get_width() * 0.85), round(img.get_height() * 0.85)))
         self.f_hud = pygame.font.Font(None, 28)
         self.f_mid = pygame.font.Font(None, 40)
         self.f_big = pygame.font.Font(None, 84)
@@ -102,6 +103,7 @@ class Campaign:
     def new_game(self):
         self.level, self.score, self.lives = 1, 0, LIVES
         self.explored = set()
+        self.world.clear_blasts()
         self.start_level(1)
         self.mode = "play"
         self.music(False)
@@ -229,14 +231,18 @@ class Campaign:
         b.vx, b.vy, b.vz = self.vx, self.vy, min(0.0, self.vz)
         b.x, b.y, b.z = self.x, self.y, self.z - 14
         self.sfx.play("drop")
-        if self.z - self.floor() < 4:          # set down on the ground: lands at once
-            b.state, b.z = "ground", self.floor()
+        if self.z - self.floor() < 4:          # set down on the ground where he was holding it
+            wx, wy = self.held_bomb_offset()[:2]
+            if not self.world.blocked(self.x + wx, self.y + wy, 0.0, 0.2):
+                b.x, b.y = self.x + wx, self.y + wy
+            b.state, b.z = "ground", self.floor(b.x, b.y)
 
     def destroy_base(self, x, y, z):
         bx, by = self.world.base
         self.bomb.state = "used"
         self.base_alive = False
         self.world.set_base(self.world.BASE_GONE)          # gone: the fireball covers the moment
+        self.world.add_blast(bx, by)                       # ...and leaves a giant scorched crater
         self.mode, self.mode_t = "boom", 0.0
         self.bonus_last = LEVEL_BONUS * self.level
         self.score += self.bonus_last
@@ -413,11 +419,40 @@ class Campaign:
             g.fill((255, 60, 40, 255), special_flags=pygame.BLEND_RGBA_MULT)
             self.screen.blit(g, (px - 13 + 1, py - img.get_height() + 4 - 7), special_flags=pygame.BLEND_ADD)
 
-    def draw_carried_bomb(self, bx, by):
-        """Hanging under his boots on a short tether."""
+    def held_bomb_offset(self):
+        """Where the bomb is held, in tiles from his feet: out in front along the sprite's own
+        (8-way) facing and a little to one side, so it still peeks out when he walks away."""
+        a = self.facing() * math.pi / 4
+        fx, fy = math.cos(a), math.sin(a)
+        d, side = 0.42, 0.28
+        if abs((fx - fy) * d - (fy + fx) * side) < abs((fx - fy) * d + (fy + fx) * side):
+            side = -side                               # whichever side shows more of it on screen
+        return fx * d - fy * side, fy * d + fx * side, fx, fy
+
+    def held_bomb_pos(self, bx, by):
+        """On foot he carries the bomb in front of him: half a tile out along his facing, at
+        waist height, bobbing with his stride. Returns (screen x, screen y, in front of him?)."""
+        wx, wy, fx, fy = self.held_bomb_offset()
+        bob = abs(math.sin(self.dist / 0.2 * math.pi / 4)) * 2.0 if math.hypot(self.vx, self.vy) > 0.4 else 0.0
+        x = bx + (wx - wy) * 32
+        y = by + (wx + wy) * 16 - 38 - bob
+        return x, y, fx + fy > -0.1                    # facing the viewer or side-on: bomb in front
+
+    def draw_carried_bomb(self, bx, by, layer=None):
+        """On foot: held in front of him (drawn before his sprite when he faces away, after it
+        when he faces the viewer; layer = "back" / "front"). Flying: hanging under his boots
+        on a short tether, so it reads as slung while he's airborne."""
         if self.bomb.state != "carried":
             return
         img = self.bomb_img
+        if self.z - self.floor() <= 0.5 and self.vz <= 0:
+            x, y, front = self.held_bomb_pos(bx, by)
+            if layer == ("front" if front else "back"):
+                img = self.bomb_held
+                self.screen.blit(img, (x - img.get_width() / 2, y - img.get_height() / 2))
+            return
+        if layer == "front":
+            return
         x, y = bx + 2, by - 16
         pygame.draw.line(self.screen, (60, 60, 60), (x, y - 8), (x, y + 2), 2)
         self.screen.blit(img, (x - img.get_width() / 2, y))
@@ -479,7 +514,7 @@ class Campaign:
             if kind == "spore":
                 surf = self.alien_spr.get("green", int(self.t * 6) % al.SPIN_FRAMES)[0]
             else:
-                surf = self.paint.get(kind, False, 1.0 if kind == "creeper" else 0.75 + 0.25 * abs(math.sin(self.t * 5)))[0]
+                surf = self.paint.get(kind, False, 1.0 if kind == "creeper" else 0.75 + 0.25 * abs(math.sin(self.t * 5)), 1.0, int(self.t * 12))[0]
             surf = pygame.transform.smoothscale_by(surf, 1.6)
             self.screen.blit(surf, ((W - surf.get_width()) // 2, 470 - surf.get_height() // 2))
         else:
