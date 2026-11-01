@@ -10,7 +10,7 @@ import math
 import numpy as np
 import pygame
 
-SS = 2                       # supersampling
+SS = 3                       # supersampling (3x3 samples a pixel: smooth edges)
 S = 64                       # sprite pixels per rig unit (about 1.9 units tall)
 # Camera basis for 2:1 isometric (30 degree elevation): right, up, towards viewer.
 R = np.array([0.7071, -0.7071, 0.0])
@@ -189,8 +189,9 @@ def render(rg, extra=()):
     ol = msk.outline()
     big = pygame.Surface((W, Hh), pygame.SRCALPHA)
     if len(ol) > 2:
-        for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
-            pygame.draw.lines(big, (18, 18, 22, 255), True, [(x + dx / 2, y + dy / 2) for x, y in ol], 3)
+        o = SS / 2                                    # same outline weight at any supersampling
+        for dx, dy in ((-o, 0), (o, 0), (0, -o), (0, o)):
+            pygame.draw.lines(big, (18, 18, 22, 255), True, [(x + dx, y + dy) for x, y in ol], round(1.5 * SS))
     big.blit(surf, (0, 0))
     small = pygame.transform.smoothscale(big, (W // SS, Hh // SS))
     return small, (ox / SS, oy / SS)

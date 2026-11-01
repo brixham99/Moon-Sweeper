@@ -15,6 +15,7 @@ import random
 
 import pygame
 
+import aa
 import aliens as al
 import base as bs
 import rover as rv
@@ -46,6 +47,10 @@ BOOM_TIME = 2.6
 CARD_TIME = 4.5
 DIE_TIME = 1.8
 TOP10_TIME = 7.0
+SAFE_TIME = 2.0                   # s of blinking invulnerability after a respawn or a new level
+ESC_CONFIRM = 2.5                 # s to press Esc a second time to leave a game
+INTRO_TIME = 4.0                  # level intro banner
+LOW_STAMINA = 0.25                # warning beep when stamina drops below this
 COPYRIGHT = "\u00a92026 Nathan Anderson. Made in England by Optica."
 TITLE_ART = os.path.join(HERE, "assets", "art", "title.jpg")
 TITLE_MUSIC = os.path.join(HERE, "assets", "sounds", "title_theme.ogg")
@@ -57,6 +62,7 @@ class Bomb:
         self.x, self.y, self.z = x, y, z
         self.vx = self.vy = self.vz = 0.0
         self.state = "ground"         # ground | carried | falling
+        self.knocked = False          # jolted loose by a spore (says so itself, not "Missed!")
 
 
 class Campaign:
@@ -95,6 +101,13 @@ class Campaign:
         self._tc = {}
         self.base_rng = random.Random()
         self.bomb = Bomb(*self.bomb_home())
+        self.paused = False
+        self.esc_t = 0.0               # > 0: a second Esc leaves the game
+        self.safe_t = 0.0              # > 0: aliens can't hurt him (just respawned)
+        self.notice = None             # (text, colour, seconds left)
+        self.popups = []               # floating scores: [x, y, z, text, colour, age]
+        self.warned_low = False
+        self.seek_cool, self.seek_charge, self.seek_n = 1.5, 0.0, 0
 
     def bomb_home(self):
         rx, ry = self.world.rover
@@ -123,6 +136,13 @@ class Campaign:
         self.bomb = Bomb(*self.bomb_home())
         self.aliens.clear(); self.spawned.clear(); self.killed.clear()
         self.splats.clear(); self.lasers.clear()
+        self.seek_cool, self.seek_charge = 1.5, 0.0
+        bx, by = self.world.base                          # the base starts with its guards up
+        most = al.seeker_tuning(level)[1]
+        for i in range(most):
+            self.seek_n += 1
+            a = al.Seeker(("seek", level, self.seek_n), bx, by, 0.0, i * math.tau / most, level, self.seek_n, armed=True)
+            self.aliens[a.uid] = a
 
     def reset_jetman(self):
         s = self.world.start
@@ -131,6 +151,9 @@ class Campaign:
         self.a = math.pi / 4
         self.fuel, self.stamina = FUEL_MAX, STAMINA_MAX
         self.hit_t = 9.0
+        self.safe_t = SAFE_TIME
+        self.warned_low = False
+        self.paused = False
         self.cam = list(to_screen(self.x, self.y))
 
     # ------------------------------------------------------------ per frame
@@ -149,6 +172,14 @@ class Campaign:
     def campaign_update(self, dt):
         self.mode_t += dt
         self.shake = max(0.0, self.shake - dt * 2.5)
+        self.safe_t = max(0.0, self.safe_t - dt)
+        self.esc_t = max(0.0, self.esc_t - dt)
+        if self.notice:
+            self.notice = self.notice[:2] + (self.notice[2] - dt,) if self.notice[2] > dt else None
+        for p in self.popups:
+            p[5] += dt
+        self.popups = [p for p in self.popups if p[5] < 1.1]
+        self.base_fire(dt)
         if self.mode in ("play", "boom"):
             if self.thrusting and not self.infinite:
                 self.fuel = max(0.0, self.fuel - FUEL_BURN * dt)
@@ -165,6 +196,12 @@ class Campaign:
             self.update_bomb(dt)
             if self.stamina <= 0 and self.mode == "play" and not self.infinite:
                 self.lose_life()
+            elif self.stamina < STAMINA_MAX * LOW_STAMINA and not self.warned_low and self.mode == "play":
+                self.warned_low = True
+                self.sfx.play("warn")
+                self.say("Running out of puff! Land on the rover roof to rest", (255, 170, 90), 3.0)
+            elif self.stamina > STAMINA_MAX * (LOW_STAMINA + 0.1):
+                self.warned_low = False
         if self.mode == "boom" and self.mode_t > BOOM_TIME:
             self.mode, self.mode_t = "card", 0.0
             self.sfx.play("levelup")
@@ -180,8 +217,55 @@ class Campaign:
                     self.bomb = Bomb(*self.bomb_home())
                 self.mode, self.mode_t = "play", 0.0
 
+    def base_fire(self, dt):
+        """The Alien Missile Base fights back: when Jetman comes within range it glows at the top
+        of its force field for a moment, then lets go a spore that guards it and hunts him."""
+        al.Seeker.hunting = sum(1 for a in self.aliens.values() if a.kind == "seeker" and a.mode == "hunt")
+        if self.mode != "play" or not self.base_alive:
+            self.seek_charge = 0.0
+            return
+        bx, by = self.world.base
+        interval, most, _, _ = al.seeker_tuning(self.level)
+        alive = sum(1 for a in self.aliens.values() if a.kind == "seeker")
+        near = math.hypot(self.x - bx, self.y - by) < al.SEEK_RANGE
+        self.seek_cool -= dt
+        if self.seek_charge > 0:
+            self.seek_charge += dt
+            if self.seek_charge >= al.SEEK_CHARGE:
+                close = math.hypot(self.x - bx, self.y - by) < bs.FIELD_R + 3
+                self.seek_charge, self.seek_cool = 0.0, interval * (0.6 if close else 1.0)   # angrier up close
+                self.seek_n += 1
+                ang = math.atan2(self.y - by, self.x - bx) + self.rng.uniform(-1.2, 1.2)
+                a = al.Seeker(("seek", self.level, self.seek_n), bx, by, bs.FIELD_H - 20, ang, self.level, self.seek_n)
+                self.aliens[a.uid] = a
+                self.alien_sound("spit", a)
+        elif near and self.seek_cool <= 0 and alive < most and self.safe_t <= 0:
+            self.seek_charge = 1e-6
+
+    def draw_base_charge(self, cx, cy):
+        """The warning glow on top of the dome before a spore is fired."""
+        if self.seek_charge <= 0 or not self.base_alive:
+            return
+        bx, by = self.world.base
+        px, py = to_screen(bx, by, bs.FIELD_H - 6)
+        k = self.seek_charge / al.SEEK_CHARGE
+        size = int(20 + 70 * k + 8 * math.sin(self.t * 30))
+        sx, sy = px - cx, py - cy
+        g = self.tinted_glow(max(8, size), (255, int(120 + 80 * k), 40))
+        for _ in range(2):                                   # bright enough to read against the dome
+            self.screen.blit(g, (sx - g.get_width() / 2, sy - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
+        core = self.tinted_glow(max(6, int(size * 0.4)), (255, 240, 200))
+        self.screen.blit(core, (sx - core.get_width() / 2, sy - core.get_height() / 2), special_flags=pygame.BLEND_ADD)
+
+    def say(self, text, col=(235, 235, 235), secs=2.5):
+        """A short message under the HUD."""
+        self.notice = (text, col, secs)
+
+    def popup(self, x, y, z, points, col=(255, 230, 120)):
+        self.popups.append([x, y, z, f"+{points:,}", col, 0.0])
+
     def hurt_stamina(self, amount):
-        if self.mode == "play" and not self.infinite:
+        if self.mode == "play" and not self.infinite and self.safe_t <= 0:
             self.stamina = max(0.0, self.stamina - amount)
 
     def lose_life(self):
@@ -197,6 +281,7 @@ class Campaign:
 
     def alien_killed(self, a):
         self.score += al.KINDS[a.kind][2]
+        self.popup(a.x, a.y, a.z + al.KINDS[a.kind][6] + 30, al.KINDS[a.kind][2])
         self.kills_level += 1
 
     # ------------------------------------------------------------ the bomb
@@ -213,15 +298,46 @@ class Campaign:
             for _ in range(3):
                 b.x += b.vx * dt / 3; b.y += b.vy * dt / 3; b.z += b.vz * dt / 3
                 bx, by = self.world.base
-                if self.base_alive and (bs.field_e(bx, by, b.x, b.y, b.z) < 1.0 or b.z <= bs.height_at(bx, by, b.x, b.y) + 2):
+                top = bs.height_at(bx, by, b.x, b.y)       # 0 away from the base: that's a miss, not a hit
+                if self.base_alive and (bs.field_e(bx, by, b.x, b.y, b.z) < 1.0 or (top > 0 and b.z <= top + 2)):
                     self.destroy_base(b.x, b.y, max(b.z, 30))
                     return
                 fl = self.world.floor_at(b.x, b.y)
                 if b.z <= fl:
+                    r = math.hypot(b.x - bx, b.y - by)
+                    if self.base_alive and 0 < r < bs.FIELD_R + 1.0:     # roll it clear of the force field,
+                        k = (bs.FIELD_R + 1.0) / r                       # where Jetman can get at it
+                        nx, ny = bx + (b.x - bx) * k, by + (b.y - by) * k
+                        if not self.world.blocked(nx, ny, 0.0, 0.2):
+                            b.x, b.y = nx, ny
+                            fl = self.world.floor_at(b.x, b.y)
                     b.z, b.state = fl, "ground"
                     b.vx = b.vy = b.vz = 0.0
                     self.sfx.play("bounce", 0.9)
+                    if not getattr(b, "knocked", False):
+                        self.say("Missed! Pick the bomb up and try again", (255, 170, 90), 3.0)
+                    b.knocked = False
                     break
+
+    def knock_bomb_loose(self, nx=0.0, ny=0.0):
+        """A spore bursting on Jetman jolts the bomb out of his hands: it tumbles away the way
+        the spore pushed him, so near the base it's a miss rather than a lucky hit."""
+        b = self.bomb
+        if b.state != "carried" or self.mode != "play" or self.infinite:
+            return
+        b.state, b.knocked = "falling", True
+        b.vx, b.vy, b.vz = nx * 1.8, ny * 1.8, 40.0
+        b.x, b.y, b.z = self.x, self.y, self.z - 14
+        self.sfx.play("drop")
+        self.say("A spore knocked the bomb loose! Pick it up again", (255, 170, 90), 3.5)
+
+    def spores_regroup(self):
+        """After a spore gets him, the others go back on guard and the base waits a moment,
+        so he has a fair chance to pick the bomb up again rather than being hit over and over."""
+        for a in self.aliens.values():
+            if a.kind == "seeker" and a.mode == "hunt" and a.age < a.life:
+                a.mode, a.life, a.calm_t = "guard", 1e9, 4.0
+        self.seek_cool = max(self.seek_cool, al.seeker_tuning(self.level)[0] * 1.5)
 
     def drop_bomb(self):
         b = self.bomb
@@ -241,11 +357,14 @@ class Campaign:
         bx, by = self.world.base
         self.bomb.state = "used"
         self.base_alive = False
+        for a in [a for a in self.aliens.values() if a.kind == "seeker"]:
+            a.age = a.life                                  # its spores burn out with it
         self.world.set_base(self.world.BASE_GONE)          # gone: the fireball covers the moment
         self.world.add_blast(bx, by)                       # ...and leaves a giant scorched crater
         self.mode, self.mode_t = "boom", 0.0
         self.bonus_last = LEVEL_BONUS * self.level
         self.score += self.bonus_last
+        self.popup(bx, by, 180, self.bonus_last, (140, 255, 160))
         self.shake = 1.0
         self.sfx.play("boom")
         rnd = self.rng
@@ -292,12 +411,33 @@ class Campaign:
                 self.to_title()
             return None
         if e.key == pygame.K_ESCAPE:
-            self.to_title()
-        elif e.key == BOMB_KEY:
+            if self.paused or self.esc_t > 0 or self.mode not in ("play", "boom"):
+                self.to_title()                 # a second Esc (or Esc from the pause panel) leaves
+            else:
+                self.esc_t = ESC_CONFIRM
+            return None
+        if e.key == pygame.K_p and self.mode in ("play", "boom", "dying", "card"):
+            self.set_paused(not self.paused)
+            return None
+        if self.paused:
+            if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                self.set_paused(False)
+            return None
+        self.esc_t = 0.0
+        if e.key == BOMB_KEY:
             self.drop_bomb()
         elif self.mode == "card" and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             self.mode_t = CARD_TIME
         return None
+
+    def set_paused(self, on):
+        if on and self.mode not in ("play", "boom", "dying", "card"):
+            return
+        self.paused = on
+        try:
+            (pygame.mixer.pause if on else pygame.mixer.unpause)()
+        except Exception:
+            pass
 
     def handle_text(self, text):
         if self.mode == "over" and self.entry_active:
@@ -346,6 +486,8 @@ class Campaign:
         if self.mode in ("play", "dying", "boom", "card") and self.score > 0:
             self.board.record_local(self.score)
         self.mode, self.title_t = "title", 0.0
+        self.set_paused(False)
+        self.esc_t = 0.0
         self._stop_text()
         self.board.refresh()
         self.music(True)
@@ -376,29 +518,78 @@ class Campaign:
         return im
 
     def text(self, font, s, col, shadow=True):
+        """Text with a thin dark outline and a soft drop shadow, so it reads on bright ground. Cached."""
+        k = ("t", id(font), s, col, shadow)
+        out = self._tc.get(k)
+        if out is not None:
+            return out
         im = font.render(s, True, col)
         if not shadow:
             return im
-        out = pygame.Surface((im.get_width() + 2, im.get_height() + 2), pygame.SRCALPHA)
-        out.blit(font.render(s, True, (0, 0, 0)), (2, 2))
-        out.blit(im, (0, 0))
+        dark = font.render(s, True, (0, 0, 0))
+        out = pygame.Surface((im.get_width() + 4, im.get_height() + 4), pygame.SRCALPHA)
+        sh = dark.copy()
+        sh.set_alpha(150)
+        out.blit(sh, (3, 3))
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+            out.blit(dark, (1 + dx, 1 + dy))
+        out.blit(im, (1, 1))
+        if len(self._tc) > 400:
+            self._tc.clear()
+        self._tc[k] = out
         return out
 
-    def ctext(self, font, s, col, y):
+    def ctext(self, font, s, col, y, dst=None):
         im = self.text(font, s, col)
-        self.screen.blit(im, ((W - im.get_width()) // 2, y))
+        (dst or self.screen).blit(im, ((W - im.get_width()) // 2, y))
         return im
+
+    def band(self, y, h, alpha=150):
+        """A dark horizontal band, soft at the top and bottom edges, to set text on."""
+        k = ("band", h, alpha)
+        im = self._tc.get(k)
+        if im is None:
+            im = pygame.Surface((W, h), pygame.SRCALPHA)
+            edge = min(24, h // 3)
+            for r in range(h):
+                f = min(1.0, min(r, h - 1 - r) / edge)
+                im.fill((6, 8, 14, int(alpha * f * f * (3 - 2 * f))), (0, r, W, 1))
+            self._tc[k] = im
+        self.screen.blit(im, (0, y))
 
     def bar(self, x, y, w, h, frac, col, label):
         sc = self.screen
         lab = self.rtext(self.font, label, (200, 200, 200))
         sc.blit(lab, (x, y + (h - lab.get_height()) // 2 + 1))
         x += lab.get_width() + 8
-        pygame.draw.rect(sc, (40, 40, 44), (x, y, w, h))
-        low = frac < 0.25 and int(self.t * 4) % 2 == 0
-        pygame.draw.rect(sc, (235, 60, 50) if low else col, (x, y, int(w * max(0.0, min(1.0, frac))), h))
-        pygame.draw.rect(sc, (150, 150, 150), (x, y, w, h), 1)
+        r = h // 2
+        frac = max(0.0, min(1.0, frac))
+        pygame.draw.rect(sc, (34, 34, 40), (x, y, w, h), border_radius=r)
+        if frac < 0.25:                                # low: pulse towards red
+            k = 0.5 + 0.5 * math.sin(self.t * 9)
+            col = tuple(int(c + (t - c) * k) for c, t in zip(col, (240, 55, 45)))
+        fw = int(w * frac)
+        if fw > 0:
+            pygame.draw.rect(sc, col, (x, y, max(fw, h), h), border_radius=r)
+            hi = tuple(min(255, c + 70) for c in col)    # a sheen along the top
+            pygame.draw.rect(sc, hi, (x + 3, y + 2, max(0, max(fw, h) - 6), 3), border_radius=2)
+            if fw < h:                                 # nearly empty: clip the rounded end back
+                pygame.draw.rect(sc, (34, 34, 40), (x + fw, y, h - fw, h))
+        pygame.draw.rect(sc, (150, 150, 158), (x, y, w, h), 1, border_radius=r)
         return x + w
+
+    def helmet_icon(self):
+        """A little Jetman helmet for the lives counter, drawn as shapes."""
+        im = self._tc.get("helmet")
+        if im is None:
+            im = pygame.Surface((22, 22), pygame.SRCALPHA)
+            aa.polygon(im, (150, 150, 160), [(4, 15), (18, 15), (17, 20), (5, 20)])   # neck ring
+            aa.circle(im, (232, 232, 238), (11, 10), 8)                               # dome
+            aa.ellipse(im, (150, 90, 20), (9, 6, 10, 8))                              # visor, looking right
+            aa.ellipse(im, (250, 200, 90), (12, 7, 4, 2))                             # glint
+            aa.circle(im, (110, 110, 120), (11, 10), 8, 1)
+            self._tc["helmet"] = im
+        return im
 
     def draw_bomb_obj(self, cx, cy):
         b = self.bomb
@@ -463,10 +654,16 @@ class Campaign:
         pygame.draw.rect(sc, (0, 0, 0), (0, 0, W, 34))
         pygame.draw.line(sc, (90, 90, 90), (0, 34), (W, 34))
         x = 14
-        for s_, col in ((f"SCORE {self.score:,}", (255, 220, 120)), (f"LEVEL {self.level}", (225, 225, 225)),
-                        (f"LIVES {max(0, self.lives)}", (225, 225, 225))):
+        for s_, col in ((f"SCORE {self.score:,}", (255, 220, 120)), (f"LEVEL {self.level}", (225, 225, 225))):
             im = self.rtext(self.font, s_, col)
             sc.blit(im, (x, 9)); x += im.get_width() + 26
+        im = self.rtext(self.font, "LIVES", (225, 225, 225))
+        sc.blit(im, (x, 9)); x += im.get_width() + 6
+        hel = self.helmet_icon()
+        n = max(0, self.lives)
+        for i in range(min(n, 8)):
+            sc.blit(hel, (x, 6)); x += 20
+        x += 22 if n else 8
         x = self.bar(x, 10, 130, 14, self.fuel / FUEL_MAX, (255, 190, 60), "FUEL") + 22
         x = self.bar(x, 10, 130, 14, self.stamina / STAMINA_MAX, (90, 220, 120), "STAMINA") + 22
         st = {"carried": ("BOMB CARRIED \u2013 PRESS B TO DROP", (255, 120, 80)), "falling": ("BOMB FALLING", (255, 120, 80)),
@@ -476,26 +673,53 @@ class Campaign:
         alt = self.z - self.floor()
         im = self.rtext(self.font, f"ALT {int(alt):3d} m", (170, 170, 170))
         sc.blit(im, (W - im.get_width() - 14, 9))
-        pygame.draw.rect(sc, (0, 0, 0), (0, H - 34, W, 34))
-        pygame.draw.line(sc, (90, 90, 90), (0, H - 34), (W, H - 34))
-        hint = "Left/Right turn   Up/Down move   Space jetpack   Ctrl or Z fire   B drop bomb   F full screen   Esc title screen"
-        im = self.rtext(self.font, hint, (150, 150, 150))
-        sc.blit(im, (W - im.get_width() - 14, H - 25))
-        if self.on_rover_roof() and (self.fuel < FUEL_MAX - 0.5 or self.stamina < STAMINA_MAX - 0.5):
-            self.ctext(self.f_hud, "Refuelling and resting on the rover\u2026", (140, 230, 255), 46)
+        self.draw_popups()
+        msg = None
+        if self.esc_t > 0:
+            msg = ("Press Esc again to quit to the title screen", (255, 230, 150))
+        elif self.on_rover_roof() and (self.fuel < FUEL_MAX - 0.5 or self.stamina < STAMINA_MAX - 0.5):
+            msg = ("Refuelling and resting on the rover\u2026", (140, 230, 255))
         elif self.fuel <= 0 and not self.infinite:
-            self.ctext(self.f_hud, "Out of fuel! Walk back to the rover and climb aboard", (255, 120, 90), 46)
-        if self.mode == "play" and self.mode_t < 4.0:
-            self.ctext(self.f_big, f"LEVEL {self.level}", (235, 235, 235), 120)
-            self.ctext(self.f_mid, "Take the bomb from beside the rover to the Alien Missile Base", (220, 220, 200), 190)
-            self.ctext(self.f_hud, "The red beacons lead the way", (255, 140, 120), 230)
+            msg = ("Out of fuel! Walk back to the rover and climb aboard", (255, 120, 90))
+        elif self.notice:
+            msg = self.notice[:2]
+        if msg:
+            self.ctext(self.f_hud, msg[0], msg[1], 46)
+        if self.mode == "play" and self.mode_t < INTRO_TIME:
+            t = self.mode_t                            # fade in, hold, fade out
+            a = min(1.0, t / 0.35, (INTRO_TIME - t) / 0.6)
+            lay = pygame.Surface((W, 170), pygame.SRCALPHA)
+            self.ctext(self.f_big, f"LEVEL {self.level}", (240, 240, 240), 6, lay)
+            self.ctext(self.f_mid, "Take the bomb from beside the rover to the Alien Missile Base", (235, 230, 205), 80, lay)
+            self.ctext(self.f_hud, "The red beacons lead the way", (255, 150, 130), 124, lay)
+            self.band(40, 196, int(150 * a))
+            lay.set_alpha(int(255 * a))
+            sc.blit(lay, (0, 56))
         if self.mode == "dying":
+            self.band(196, 150, 160)
             self.ctext(self.f_big, "EXHAUSTED!", (255, 110, 90), 220)
             self.ctext(self.f_mid, f"Lives left: {max(0, self.lives)}" if self.lives > 0 else "No lives left", (230, 230, 230), 300)
         if self.mode == "card":
             self.draw_card()
         if self.mode == "over":
             self.draw_over()
+        if self.paused:
+            self.veil(120)
+            self.band(250, 200, 190)
+            self.ctext(self.f_big, "PAUSED", (240, 240, 240), 290)
+            self.ctext(self.f_hud, "P or Enter to carry on      Esc to quit to the title screen", (200, 200, 200), 380)
+
+    def draw_popups(self):
+        """Floating '+500' scores where an alien or the base was destroyed."""
+        cx, cy = self.cam
+        for x, y, z, s_, col, age in self.popups:
+            im = self.text(self.f_mid, s_, col)
+            px, py = to_screen(x, y, z)
+            a = min(1.0, (1.1 - age) / 0.4)
+            if a < 1.0:
+                im = im.copy()
+                im.set_alpha(int(255 * a))
+            self.screen.blit(im, (px - cx + W / 2 - im.get_width() / 2, py - cy + H / 2 - 44 * age))
 
     def veil(self, a=170):
         v = pygame.Surface((W, H), pygame.SRCALPHA)
@@ -584,11 +808,11 @@ class Campaign:
     def draw_controls(self, py):
         sc = self.screen
         lines = ["Left / Right: turn      Up / Down: forwards / backwards      Space: jetpack",
-                 "Ctrl or Z: fire      B: drop the bomb      F: full screen      Esc: title screen",
+                 "Ctrl or Z: fire      B: drop the bomb      P: pause      F: full screen      Esc: quit",
                  "Carry the bomb from the rover to the Alien Missile Base and drop it on the dome.",
                  "Land on the rover roof to refuel the jetpack and get your strength back."]
         panel = pygame.Surface((960, 160), pygame.SRCALPHA)
-        panel.fill((4, 8, 14, 180))
+        pygame.draw.rect(panel, (4, 8, 14, 180), panel.get_rect(), border_radius=6)
         pygame.draw.rect(panel, (90, 180, 210, 200), panel.get_rect(), 1, border_radius=6)
         sc.blit(panel, ((W - 960) // 2, py))
         for i, ln in enumerate(lines):

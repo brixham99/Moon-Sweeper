@@ -141,10 +141,41 @@ def levelup():
     return _norm(np.concatenate(parts), 0.6)
 
 
+def spit():
+    """The base launches a spore: a wet, bubbly gulp that bends upwards."""
+    t = _t(0.42)
+    f = 160 + 520 * (t / 0.42) ** 1.6 + 40 * np.sin(2 * np.pi * 23 * t)
+    ph = 2 * np.pi * np.cumsum(f) / RATE
+    body = np.sin(ph) + 0.35 * np.sin(ph * 2.01)
+    hiss = _lowpass(rng.standard_normal(len(t)), 2600) * np.exp(-t * 10) * 1.5
+    return _norm((body + hiss) * _env(len(t), 0.004, 0.12), 0.7)
+
+
+def seek():
+    """A homing spore's warble: a short trilled chirp, repeated while it flies."""
+    t = _t(0.16)
+    f = 1150 + 260 * np.sin(2 * np.pi * 38 * t) - 500 * t / 0.16
+    x = np.sin(2 * np.pi * np.cumsum(f) / RATE)
+    x = np.tanh(2.0 * x) * (0.6 + 0.4 * np.sin(2 * np.pi * 38 * t))
+    return _norm(x * _env(len(t), 0.004, 0.07), 0.5)
+
+
+def warn():
+    """Low stamina: two soft descending beeps."""
+    parts = []
+    for f in (880.0, 660.0):
+        t = _t(0.12)
+        x = np.sin(2 * np.pi * f * t) + 0.25 * np.sin(2 * np.pi * f * 2 * t)
+        parts += [x * _env(len(t), 0.004, 0.06), np.zeros(int(RATE * 0.06))]
+    return _norm(np.concatenate(parts), 0.6)
+
+
 BUILDERS = {"thrust": thrust, "phaser": phaser, "hurt": hurt, "bounce": bounce, "spin": spin, "pop": pop,
-            "boom": boom, "pickup": pickup, "drop": drop, "levelup": levelup}
+            "boom": boom, "pickup": pickup, "drop": drop, "levelup": levelup, "warn": warn,
+            "spit": spit, "seek": seek}
 GAIN = {"thrust": 0.55, "phaser": 0.45, "hurt": 0.9, "bounce": 0.3, "spin": 0.18, "pop": 0.48,
-        "boom": 1.0, "pickup": 0.5, "drop": 0.45, "levelup": 0.55}   # alien sounds at 60%
+        "boom": 1.0, "pickup": 0.5, "drop": 0.45, "levelup": 0.55, "warn": 0.4,
+        "spit": 0.42, "seek": 0.2}   # alien sounds at 60%
 
 
 def build_all():

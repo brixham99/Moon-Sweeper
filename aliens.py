@@ -25,7 +25,12 @@ VARIANTS = {
     "violet":  ((110, 60, 160),  (200, 120, 255),  (150, 150, 158)),
     "amber":   ((170, 110, 30),  (255, 196, 70),   (156, 154, 146)),
 }
-NAMES = list(VARIANTS)
+NAMES = list(VARIANTS)          # the bouncing Spore Hoppers (spawn tables pick from these)
+# the Alien Missile Base's homing spores: smaller, hot orange with red-hot tips (never purple)
+SEEKER_VARIANT = ((255, 170, 60), (255, 60, 20), (255, 120, 40))
+SEEKER_SCALE = 0.7
+ALL_VARIANTS = dict(VARIANTS, seeker=SEEKER_VARIANT)
+SPHERE_KINDS = ("spore", "seeker")   # drawn with the lit-sphere sprites rather than painted art
 
 
 def _fib(n, seed):
@@ -49,7 +54,9 @@ def _rot(axis, ang):
 
 
 def build(variant, frame):
-    stalk, club, body = VARIANTS[variant]
+    stalk, club, body = ALL_VARIANTS[variant]
+    k = SEEKER_SCALE if variant == "seeker" else 1.0
+    BODY_R, SPIKE_LEN = globals()["BODY_R"] * k, globals()["SPIKE_LEN"] * k
     R = _rot(np.array([0.35, 0.2, 1.0]), frame / SPIN_FRAMES * math.tau / 3)  # 12 frames = 1/3 turn (pattern repeats)
     c = np.array([0, 0, BODY_R + SPIKE_LEN * 0.5])
     rg = jm.Rig()
@@ -66,8 +73,8 @@ def build(variant, frame):
         tip = c + d * (BODY_R + SPIKE_LEN)
         n = 7
         for t in np.linspace(0, 1, n):
-            rg.sphere(base + (tip - base) * t, 0.026 + 0.008 * t, stalk, 0.3)
-        rg.sphere(tip + d * 0.02, 0.058, club, 0.7)
+            rg.sphere(base + (tip - base) * t, (0.026 + 0.008 * t) * (k ** 0.5), stalk, 0.3)
+        rg.sphere(tip + d * 0.02 * k, 0.058 * (k ** 0.5), club, 0.7)
     return rg
 
 
@@ -81,7 +88,7 @@ def frame_bytes(key):
 
 
 def all_keys():
-    return [(v, f) for v in NAMES for f in range(SPIN_FRAMES)]
+    return [(v, f) for v in NAMES + ["seeker"] for f in range(SPIN_FRAMES)]
 
 
 class AlienSprites:
@@ -212,10 +219,11 @@ KINDS = {
     "spore":   (None,           None,     100,    8,           None,            0.55,          22),
     "creeper": ("creeper.png",  78,       150,    12,          (200, 110, 40),  0.7,           14),
     "flyer":   ("flyer.png",    104,      250,    15,          (70, 200, 220),  0.75,          16),
+    "seeker":  (None,           None,     50,     10,          None,            0.5,           14),
 }
 CREEPER_SHEET, CREEPER_FRAMES, CREEPER_PAD = "creeper_walk.png", 8, 6
 CREEPER_STRIDE = 0.42        # tiles travelled per full scuttle cycle (keeps the feet from sliding)
-KIND_NAMES = {"spore": "Spore Hoppers", "creeper": "Rock Creepers", "flyer": "Void Rays"}
+KIND_NAMES = {"spore": "Spore Hoppers", "creeper": "Rock Creepers", "flyer": "Void Rays", "seeker": "Seeker Spores"}
 
 
 class PaintedSprites:
@@ -330,7 +338,7 @@ class Flyer:
         self.rng = random.Random(seed)
         self.heading = self.rng.uniform(0, math.tau)
         self.speed = speed
-        self.cruise = self.rng.uniform(110, 190)
+        self.cruise = self.rng.uniform(*FLYER_CRUISE)       # up where a high-flying Jetman goes
         self.z = self.cruise
         self.vx = self.vy = self.vz = 0.0
         self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
@@ -357,7 +365,7 @@ class Flyer:
             if self.mode_t <= 0 or self.hit_cool > 0.3:
                 self.mode, self.mode_t = "climb", 1.8
         else:
-            sp, tz = 3.4, self.cruise + 60
+            sp, tz = 3.4, min(300.0, self.cruise + 50)
             if self.mode_t <= 0:
                 self.mode, self.mode_t = "glide", self.rng.uniform(1.5, 3.5)
         sp *= self.speed
@@ -372,6 +380,120 @@ class Flyer:
 
     def squash(self):
         return 1.0, 0.72 + 0.28 * abs(math.sin(self.spin))          # wing beat
+
+
+FLYER_CRUISE = (150.0, 255.0)   # px; was 110-190, which let Jetman cruise over them at ~205
+
+
+# ---------------------------------------------------------------- the base's homing spores
+SEEK_RANGE = 36.0               # tiles from the base: it starts launching when Jetman is this close
+SEEK_CHARGE = 1.0               # s of glow at the dome's top before each launch (a fair warning)
+GUARD_R = (1.4, 3.0)            # tiles: guard spores circle over the dome, above the force field...
+GUARD_Z = (175.0, 235.0)        # ...at about the height you need to drop the bomb from
+HUNT_RANGE = 13.0               # tiles: a guard peels off after Jetman when he comes this close
+SPORE_FLOOR = 90.0              # px: the lowest a spore will drift above the ground (a walking Jetman is clear)
+MAX_HUNTERS = 2                 # never more than two chasing him at once; the rest stay on guard
+HUNT_LIFE = 7.0                 # s of chasing before a spore fizzles out on its own
+
+
+def seeker_tuning(level):
+    """(launch interval s, most alive at once, speed tiles/s, turn rad/s) for a level.
+    Jetman flies at 6.5 tiles/s and walks at 3, so a spore can always be outrun in the air."""
+    n = level - 1
+    return (max(1.8, 2.8 - 0.25 * n), min(5, 2 + (n + 1) // 2), min(3.4, 2.4 + 0.2 * n), min(2.0, 1.4 + 0.1 * n))
+
+
+class Seeker:
+    """Fired from the top of the force field. It rises out and circles the base as a guard;
+    when Jetman comes close it peels off and drifts after his chest, turning only slowly,
+    so you can dodge it, outrun it or shoot it. It glows and warbles so you know it's there."""
+    kind = "seeker"
+    variant = "seeker"
+    hunting = 0                  # how many are chasing him right now (the campaign counts them each frame)
+
+    def __init__(self, uid, bx, by, z, ang, level, rng_seed=0, armed=False):
+        self.uid, self.bx, self.by = uid, bx, by
+        self.x, self.y, self.z = bx, by, z
+        _, _, self.speed, self.turn = seeker_tuning(level)
+        self.rng = random.Random(rng_seed)
+        self.orbit = ang                                  # angle round the base it heads for
+        self.orbit_dir = self.rng.choice((1, -1))
+        self.guard_z = self.rng.uniform(*GUARD_Z)
+        self.guard_r = self.rng.uniform(*GUARD_R)
+        self.heading = ang
+        self.mode = "rise"
+        self.vx = self.vy = 0.0
+        self.vz = 150.0
+        self.age, self.hunt_t = 0.0, 0.0
+        self.spin, self.spin_rate = 0.0, 8.0
+        self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
+        self.chirp_t = 0.3
+        self.life = 1e9
+        self.last_j, self.jv = None, [0.0, 0.0]
+        self.calm_t = 0.0                                 # s before a regrouped guard will hunt again
+        if armed:                                         # already on guard when the level starts
+            self.mode, self.age = "guard", 2.0
+            self.x, self.y = bx + math.cos(ang) * self.guard_r, by + math.sin(ang) * self.guard_r
+            self.z, self.vz = self.guard_z, 0.0
+            self.heading = ang + self.orbit_dir * math.pi / 2
+
+    def steer_to(self, tx, ty, dt, turn):
+        want = math.atan2(ty - self.y, tx - self.x)
+        diff = (want - self.heading + math.pi) % math.tau - math.pi
+        self.heading += max(-turn * dt, min(turn * dt, diff))
+
+    def update(self, dt, world, jx, jy, events, jz=0.0):
+        self.age += dt
+        self.hit_cool -= dt
+        self.spin += self.spin_rate * dt
+        if self.age >= self.life:
+            events.append(("fizzle", self))
+            return
+        dj = math.hypot(jx - self.x, jy - self.y)
+        if self.last_j is not None and dt > 0:            # watch how he's moving, to head him off a little
+            k = min(1.0, dt * 4)
+            self.jv[0] += ((jx - self.last_j[0]) / dt - self.jv[0]) * k
+            self.jv[1] += ((jy - self.last_j[1]) / dt - self.jv[1]) * k
+        self.last_j = (jx, jy)
+        if self.mode == "rise":
+            self.vz = 150.0
+            if self.age > 0.45:
+                self.mode = "guard"
+        if self.mode == "guard":
+            self.orbit += self.orbit_dir * 0.55 * dt
+            tx, ty = self.bx + math.cos(self.orbit) * self.guard_r, self.by + math.sin(self.orbit) * self.guard_r
+            self.steer_to(tx, ty, dt, 3.0)
+            sp = self.speed * min(1.0, math.hypot(tx - self.x, ty - self.y) / 1.5 + 0.35)
+            tz = self.guard_z + 10 * math.sin(self.age * 1.7)
+            self.calm_t -= dt
+            if dj < HUNT_RANGE and self.age > 1.2 and self.calm_t <= 0 and Seeker.hunting < MAX_HUNTERS:
+                self.mode, self.life = "hunt", self.age + HUNT_LIFE
+                Seeker.hunting += 1
+        elif self.mode == "hunt":
+            lead = min(1.0, dj / (self.speed + 6.5)) * 0.6
+            self.steer_to(jx + self.jv[0] * lead, jy + self.jv[1] * lead, dt, self.turn)
+            sp = self.speed
+            tz = jz + 36                                         # aim the body at his chest
+        else:
+            sp, tz = self.speed * 0.5, None
+        self.vx, self.vy = math.cos(self.heading) * sp, math.sin(self.heading) * sp
+        self.x += self.vx * dt; self.y += self.vy * dt
+        if tz is not None:
+            self.vz += (max(-70.0, min(70.0, (tz - self.z) * 1.6)) - self.vz) * min(1.0, dt * 3)
+        self.z += self.vz * dt
+        self.floor = world.floor_at(self.x, self.y)
+        low = SPORE_FLOOR if self.mode != "rise" else 8.0
+        if self.z < self.floor + low:                    # spores float: they won't come down to the ground,
+            self.z = self.floor + low                    # so landing is a way to duck under one
+            self.vz = max(self.vz, 0.0)
+        self.chirp_t -= dt
+        if self.chirp_t <= 0:
+            self.chirp_t = 0.45 if self.mode == "hunt" else 0.9      # warbles faster when it's after you
+            events.append(("chirp", self))
+
+    def squash(self):
+        p = 1.0 + 0.06 * math.sin(self.age * 14)                    # a nervous throb
+        return p, p
 
 
 LEVEL_MIX = {1: [("spore", 1.0)], 2: [("creeper", 0.75), ("spore", 0.25)], 3: [("flyer", 0.6), ("creeper", 0.4)]}

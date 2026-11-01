@@ -18,13 +18,14 @@ import sys
 import threading
 import time
 
-if any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--loadshot")):
+if any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--loadshot", "--selftest", "--playthrough")):
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     os.environ["SDL_AUDIODRIVER"] = "dummy"
 
 import numpy as np
 import pygame
 
+import aa
 import world as wd
 from world import CHUNK, CW, HH, HW, TH, TW, to_screen
 import jetman as jm
@@ -72,6 +73,7 @@ def save_sprite_cache(path, res):
     except Exception:
         pass
 FPS = 60
+FOCUS_LOST = tuple(getattr(pygame, n) for n in ("WINDOWFOCUSLOST", "WINDOWMINIMIZED") if hasattr(pygame, n))
 BLACK = (0, 0, 0)          # the sky: pure black. No stars, no moon.
 
 # Movement (distances in tiles, heights in pixels)
@@ -131,6 +133,7 @@ class Game(Campaign):
         self.font = pygame.font.Font(None, 26)
         self.big = pygame.font.Font(None, 44)
         self.glow = self._glow_sprite()
+        self._glows = {}
         self.hidden = False
         self.frame_ms = []
         # every Jetman/alien frame is drawn in the worker processes, off the main
@@ -197,10 +200,10 @@ class Game(Campaign):
         """A beacon: footing plate, slim metal post, gold collar, lamp; plus red/green glows."""
         post = pygame.Surface((24, 56), pygame.SRCALPHA)
         ax, ay = 12, 48                                   # anchor: foot of the post on the ground
-        pygame.draw.polygon(post, (18, 18, 22), [(ax - 9, ay), (ax, ay - 4.5), (ax + 9, ay), (ax, ay + 4.5)])
-        pygame.draw.polygon(post, (92, 94, 100), [(ax - 8, ay), (ax, ay - 4), (ax + 8, ay), (ax, ay + 4)])
-        pygame.draw.polygon(post, (64, 66, 72), [(ax - 8, ay), (ax, ay + 4), (ax, ay + 6), (ax - 8, ay + 2)])
-        pygame.draw.polygon(post, (120, 122, 128), [(ax + 8, ay), (ax, ay + 4), (ax, ay + 6), (ax + 8, ay + 2)])
+        aa.polygon(post, (18, 18, 22), [(ax - 9, ay), (ax, ay - 4.5), (ax + 9, ay), (ax, ay + 4.5)])
+        aa.polygon(post, (92, 94, 100), [(ax - 8, ay), (ax, ay - 4), (ax + 8, ay), (ax, ay + 4)])
+        aa.polygon(post, (64, 66, 72), [(ax - 8, ay), (ax, ay + 4), (ax, ay + 6), (ax - 8, ay + 2)])
+        aa.polygon(post, (120, 122, 128), [(ax + 8, ay), (ax, ay + 4), (ax, ay + 6), (ax + 8, ay + 2)])
         pygame.draw.rect(post, (18, 18, 22), (ax - 3, ay - 36, 6, 37))
         pygame.draw.rect(post, (150, 154, 160), (ax - 2, ay - 35, 2, 35))
         pygame.draw.rect(post, (100, 104, 110), (ax, ay - 35, 2, 35))
@@ -210,9 +213,9 @@ class Game(Campaign):
         out = {}
         for name, lamp, hi in (("red", (230, 40, 34), (255, 190, 170)), ("green", (40, 220, 70), (200, 255, 200))):
             s = post.copy()
-            pygame.draw.circle(s, (18, 18, 22), (ax, ay - 43), 6)
-            pygame.draw.circle(s, lamp, (ax, ay - 43), 5)
-            pygame.draw.circle(s, hi, (ax - 1, ay - 44), 2)
+            aa.circle(s, (18, 18, 22), (ax, ay - 43), 6)
+            aa.circle(s, lamp, (ax, ay - 43), 5)
+            aa.circle(s, hi, (ax - 1, ay - 44), 2)
             if pygame.display.get_surface():
                 s = s.convert_alpha()
             glow = pygame.Surface((72, 72), pygame.SRCALPHA)
@@ -363,7 +366,7 @@ class Game(Campaign):
                 if p.z < 0:
                     p.z, p.vz = 0, -p.vz * 0.35; p.vx *= 0.6; p.vy *= 0.6
             else:
-                if p.kind not in ("fire", "shock", "smoke"):
+                if p.kind not in ("fire", "shock", "smoke", "ember"):
                     p.vz -= 300 * dt
         self.parts = [p for p in self.parts if p.age < p.life]
         self.update_aliens(dt)
@@ -414,13 +417,22 @@ class Game(Campaign):
                         self.aliens[uid] = al.make_alien(uid, x, y, kind, var, seed, self.level)
         # despawn far away; let far chunks spawn again later so the population stays steady
         for uid, a in list(self.aliens.items()):
-            if abs(a.x - self.x) > 2.6 * CHUNK or abs(a.y - self.y) > 2.6 * CHUNK:
+            if a.kind != "seeker" and (abs(a.x - self.x) > 2.6 * CHUNK or abs(a.y - self.y) > 2.6 * CHUNK):
                 del self.aliens[uid]
         self.spawned = {k for k in self.spawned if abs(k[0] - fi) <= 2 and abs(k[1] - fj) <= 2}
         ev = []
         for a in self.aliens.values():
             a.update(dt, self.world, self.x, self.y, ev, self.z)
+            if a.kind == "seeker" and self.rng.random() < dt * 30:
+                self.parts.append(Particle(a.x + self.rng.uniform(-0.08, 0.08), a.y + self.rng.uniform(-0.08, 0.08),
+                                           a.z + 14, 0, 0, self.rng.uniform(-6, 10), 0.45, "ember", self.rng.uniform(5, 9)))
         for kind, a in ev:
+            if kind == "chirp":                        # the base's spores: their own warble, with distance fade
+                self.alien_sound("seek", a)
+                continue
+            if kind == "fizzle":
+                self.fizzle(a)
+                continue
             self.alien_sound("bounce", a)
             if (a.x - self.x) ** 2 + (a.y - self.y) ** 2 < 600:
                 for _ in range(5):
@@ -435,11 +447,17 @@ class Game(Campaign):
             d = math.hypot(dx, dy)
             kd = al.KINDS[a.kind]
             body_z = a.z + kd[6]
-            if self.mode == "play" and d < kd[5] and self.z - 10 < body_z < self.z + 100 and a.hit_cool <= 0 and self.hit_t > 0.9:
+            if self.mode == "play" and d < kd[5] and self.z - 10 < body_z < self.z + 100 and a.hit_cool <= 0 and self.hit_t > 0.9 \
+                    and getattr(self, "safe_t", 0) <= 0:
                 self.hurt_stamina(kd[3])
+                if a.kind == "seeker":
+                    a.age = a.life                     # a spore bursts on him...
                 nx, ny = (dx / d, dy / d) if d > 1e-3 else (1.0, 0.0)
                 self.vx += nx * 5.0; self.vy += ny * 5.0
                 self.vz = max(self.vz, 170.0); self.z += 1
+                if a.kind == "seeker" and hasattr(self, "knock_bomb_loose"):
+                    self.knock_bomb_loose(nx, ny)      # ...and jolts the bomb out of his hands
+                    self.spores_regroup()              # the rest fall back to the base: no pile-on
                 a.vx, a.vy = -nx * 2.5, -ny * 2.5
                 a.hit_cool = 0.8
                 self.hit_t = 0.0
@@ -478,8 +496,8 @@ class Game(Campaign):
         self.alien_sound("pop", a)
         self.killed.add(a.uid)
         self.pops += 1
-        if a.kind == "spore":
-            stalk, club, _ = al.VARIANTS[a.variant]
+        if a.kind in al.SPHERE_KINDS:
+            stalk, club, _ = al.ALL_VARIANTS[a.variant]
         else:
             stalk = club = al.KINDS[a.kind][4]
         z = a.z + al.KINDS[a.kind][6]
@@ -555,7 +573,7 @@ class Game(Campaign):
             gx -= cx; gy -= cy
             if not (-120 - (a.z - a.floor) * SHADOW_K < gx < W + 60 and -60 < gy < H + 60):
                 continue
-            if a.kind == "spore":
+            if a.kind in al.SPHERE_KINDS:
                 surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES)
             else:
                 surf, ax, ay = self.paint.get(a.kind, a.flip(), *a.squash(), frame=a.frame() if a.kind == "creeper" else 0)
@@ -579,13 +597,42 @@ class Game(Campaign):
         if not (-60 < px < W + 60 and -90 < py < H + 40):
             return None
         sx, sy = a.squash()
-        if a.kind == "spore":
+        if a.kind in al.SPHERE_KINDS:
             surf, ax, ay = self.alien_spr.get(a.variant, int(a.spin) % al.SPIN_FRAMES, sx, sy)
         else:
             surf, ax, ay = self.paint.get(a.kind, a.flip(), sx, sy, a.frame() if a.kind == "creeper" else 0)
         pos = (px - ax, py - ay + (2 if a.land_t < 0.15 else 0))
+        if a.kind == "seeker":                         # hot halo so a spore reads against the grey ground
+            hunting = getattr(a, "mode", "") == "hunt"   # redder and brighter when it's coming for you
+            g = self.tinted_glow((70 if hunting else 60) + int(8 * math.sin(a.age * 14)),
+                                 (255, 96, 30) if hunting else (255, 150, 50))
+            for _ in range(2 if hunting else 1):
+                self.screen.blit(g, (px - g.get_width() / 2, py - 14 - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
         self.screen.blit(surf, pos)
         return surf, pos
+
+    def tinted_glow(self, size, col):
+        """The soft glow sprite at a size and colour (cached, for additive blits)."""
+        k = (size, col)
+        g = self._glows.get(k)
+        if g is None:
+            g = pygame.transform.smoothscale(self.glow, (size, size))
+            g.fill(col + (255,), special_flags=pygame.BLEND_RGBA_MULT)
+            if len(self._glows) > 200:
+                self._glows.clear()
+            self._glows[k] = g
+        return g
+
+    def fizzle(self, a):
+        """A base spore burns out (or bursts on Jetman): a puff of embers, no points."""
+        if a.uid not in self.aliens:
+            return
+        del self.aliens[a.uid]
+        self.alien_sound("pop", a)
+        for _ in range(10):
+            ang = self.rng.uniform(0, math.tau); s_ = self.rng.uniform(0.6, 2.0)
+            self.parts.append(Particle(a.x, a.y, a.z + 14, math.cos(ang) * s_, math.sin(ang) * s_, self.rng.uniform(-20, 40),
+                                       self.rng.uniform(0.3, 0.6), "ember", self.rng.uniform(6, 11)))
 
     # ------------------------------------------------------------ world streaming
     def load_step(self):
@@ -861,6 +908,7 @@ class Game(Campaign):
                 rs = self.base_spr.ripples[i_]
                 qx, qy = to_screen(hx, hy, hz)
                 sc.blit(rs, (qx - cx - rs.get_width() / 2, qy - cy - rs.get_height() / 2), special_flags=pygame.BLEND_ADD)
+        self.draw_base_charge(cx, cy)
         self.campaign_hud()
 
     def beacon_dim(self, red):
@@ -921,7 +969,12 @@ class Game(Campaign):
         if self.mode == "dying" and int(self.mode_t * 10) % 2 == 0:
             self.jet_draw = (surf, (bx - ax, by - ay))
             return pygame.Rect(bx - ax, by - ay, surf.get_width(), surf.get_height())
-        sc.blit(surf, (bx - ax, by - ay))
+        if getattr(self, "safe_t", 0) > 0 and self.mode == "play" and int(self.safe_t * 8) % 2 == 0:
+            ghost = surf.copy()                        # just respawned: blink while he can't be hurt
+            ghost.set_alpha(80)
+            sc.blit(ghost, (bx - ax, by - ay))
+        else:
+            sc.blit(surf, (bx - ax, by - ay))
         if self.hit_t < 0.35 and int(self.hit_t * 20) % 2 == 0:          # hit flash
             fl_ = surf.copy()
             fl_.fill((255, 70, 60, 0), special_flags=pygame.BLEND_RGBA_MAX)
@@ -937,8 +990,8 @@ class Game(Campaign):
             for i in range(6):
                 a = i * math.pi / 3 + self.t * 40
                 r = 9 if i % 2 else 5
-                pygame.draw.line(sc, col, (mx, my), (mx + math.cos(a) * r, my + math.sin(a) * r * 0.7), 2)
-            pygame.draw.circle(sc, (255, 255, 255), (mx, my), 3)
+                aa.line(sc, col, (mx, my), (mx + math.cos(a) * r, my + math.sin(a) * r * 0.7), 2)
+            aa.circle(sc, (255, 255, 255), (mx, my), 3)
         self.jet_draw = (surf, (bx - ax, by - ay))
         return pygame.Rect(bx - ax, by - ay, surf.get_width(), surf.get_height())
 
@@ -950,9 +1003,9 @@ class Game(Campaign):
             ln = 46 * fl
             g = pygame.transform.smoothscale(self.glow, (int(30 * fl), int(60 * fl)))
             sc.blit(g, (x - g.get_width() / 2, y - 6), special_flags=pygame.BLEND_ADD)
-            pygame.draw.polygon(sc, (255, 120, 30), [(x - 5, y), (x + 5, y), (x + self.rng.uniform(-1.5, 1.5), y + ln)])
-            pygame.draw.polygon(sc, (255, 220, 110), [(x - 3, y), (x + 3, y), (x, y + ln * 0.62)])
-            pygame.draw.polygon(sc, (255, 255, 235), [(x - 1.5, y), (x + 1.5, y), (x, y + ln * 0.3)])
+            aa.polygon(sc, (255, 120, 30), [(x - 5, y), (x + 5, y), (x + self.rng.uniform(-1.5, 1.5), y + ln)])
+            aa.polygon(sc, (255, 220, 110), [(x - 3, y), (x + 3, y), (x, y + ln * 0.62)])
+            aa.polygon(sc, (255, 255, 235), [(x - 1.5, y), (x + 1.5, y), (x, y + ln * 0.3)])
 
     def draw_dust(self, p, cx, cy):
         px, py = to_screen(p.x, p.y, p.z)
@@ -998,16 +1051,16 @@ class Game(Campaign):
                 px, py = to_screen(p.x, p.y, p.z)
                 k = 1 - p.age / p.life
                 if p.kind == "spark":
-                    pygame.draw.circle(sc, (255, int(200 * k + 55), int(120 * k)), (px - cx, py - cy), 1.5 + k)
+                    aa.circle(sc, (255, int(200 * k + 55), int(120 * k)), (px - cx, py - cy), 1.5 + k)
                 elif p.kind == "frag":
                     col, ang, spin = p.size
                     ang += spin * p.age
                     x0, y0 = px - cx, py - cy
                     x1, y1 = x0 + math.cos(ang) * 7, y0 + math.sin(ang) * 7
-                    pygame.draw.line(sc, (40, 40, 40), (x0, y0 + 1), (x1, y1 + 1), 3)
-                    pygame.draw.line(sc, col, (x0, y0), (x1, y1), 2)
-                    pygame.draw.circle(sc, col, (x1, y1), 3)
-                    pygame.draw.circle(sc, (255, 255, 255), (x1 - 1, y1 - 1), 1)
+                    aa.line(sc, (40, 40, 40), (x0, y0 + 1), (x1, y1 + 1), 3)
+                    aa.line(sc, col, (x0, y0), (x1, y1), 2)
+                    aa.circle(sc, col, (x1, y1), 3)
+                    aa.circle(sc, (255, 255, 255), (x1 - 1, y1 - 1), 1)
                 elif p.kind == "fire":
                     r = int(p.size * (0.45 + 0.55 * (1 - k)))
                     g = pygame.transform.smoothscale(self.glow, (r * 2, int(r * 1.6)))
@@ -1020,14 +1073,17 @@ class Game(Campaign):
                     s_ = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
                     al_ = 46 * min(1.0, k * 2.5) * min(1.0, p.age * 3)
                     for f_ in (1.0, 0.78, 0.55):             # soft edged puff
-                        pygame.draw.circle(s_, (52, 50, 48, int(al_)), (r, r), int(r * f_))
+                        aa.circle(s_, (52, 50, 48, int(al_)), (r, r), int(r * f_))
                     sc.blit(s_, (px - cx - r, py - cy - r))
                 elif p.kind == "shock":
                     r = p.size * (1 - k) + 10
-                    pygame.draw.ellipse(sc, (255, int(180 * k + 60), int(120 * k)), (px - cx - r, py - cy - r * 0.5, r * 2, r), max(1, int(6 * k)))
+                    aa.ellipse(sc, (255, int(180 * k + 60), int(120 * k)), (px - cx - r, py - cy - r * 0.5, r * 2, r), max(1, int(6 * k)))
+                elif p.kind == "ember":                # base spore trail: small hot glow, cooling
+                    g = self.tinted_glow(max(4, int(p.size * 2 * (0.4 + 0.6 * k))), (int(255 * k), int(150 * k), int(50 * k)))
+                    sc.blit(g, (px - cx - g.get_width() / 2, py - cy - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
                 elif p.kind == "ring":
                     r = 8 + 60 * (1 - k)
-                    pygame.draw.ellipse(sc, p.size, (px - cx - r, py - cy - r * 0.6, r * 2, r * 1.2), max(1, int(4 * k)))
+                    aa.ellipse(sc, p.size, (px - cx - r, py - cy - r * 0.6, r * 2, r * 1.2), max(1, int(4 * k)))
                 else:
                     g = pygame.transform.smoothscale(self.glow, (int(70 * k + 10), int(70 * k + 10)))
                     sc.blit(g, (px - cx - g.get_width() / 2, py - cy - g.get_height() / 2), special_flags=pygame.BLEND_ADD)
@@ -1052,8 +1108,8 @@ class Game(Campaign):
                 a0 = i / n; a1 = (i + 1) / n
                 q0 = (p0[0] + (p1[0] - p0[0]) * a0, p0[1] + (p1[1] - p0[1]) * a0)
                 q1 = (p0[0] + (p1[0] - p0[0]) * a1, p0[1] + (p1[1] - p0[1]) * a1)
-                pygame.draw.line(sc, col, q0, q1, 7)
-                pygame.draw.line(sc, (255, 255, 255), q0, q1, 3)
+                aa.line(sc, col, q0, q1, 7)
+                aa.line(sc, (255, 255, 255), q0, q1, 3)
             g = pygame.transform.smoothscale(self.glow, (40, 40))
             g.fill(col + (255,), special_flags=pygame.BLEND_RGBA_MULT)
             sc.blit(g, (p1[0] - 20, p1[1] - 20), special_flags=pygame.BLEND_ADD)
@@ -1316,7 +1372,7 @@ def alien_sheet(screen, out):
 
 def main():
     pygame.init()
-    headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--loadshot"))
+    headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--loadshot", "--selftest", "--playthrough"))
     if headless:
         screen = pygame.display.set_mode((W, H))
     elif "--fullscreen" in sys.argv:
@@ -1370,6 +1426,18 @@ def main():
         pygame.image.save(screen, os.path.join(outdir, "ms_loading.png"))
         print("saved ms_loading", r, n)
         return
+    if "--selftest" in sys.argv:
+        import selftest
+        sys.exit(1 if selftest.run(Game, screen) else 0)
+    if "--playthrough" in sys.argv:          # the robot plays: python3 game.py --playthrough [LEVELS] [SEED]
+        import autoplay
+        i = sys.argv.index("--playthrough")
+        nums = [int(a) for a in sys.argv[i + 1:i + 3] if a.isdigit()]
+        game.wait_ready(); game.loaded = True
+        res = autoplay.playthrough(game, *(nums + [3, 1][len(nums):]))
+        print(f"played {len(res)} level(s), score {game.score:,}, lives left {game.lives}"
+              + (", STUCK" if any(r.get("stuck") for r in res) else ""))
+        sys.exit(1 if not res or any(r.get("stuck") for r in res) else 0)
     if "--bench" in sys.argv:
         # fly fast in a straight line so new chunks stream in all the way
         game.a = 0.3
@@ -1407,6 +1475,8 @@ def main():
                     pygame.quit(); return
             elif e.type == pygame.TEXTINPUT:
                 game.handle_text(e.text)
+            elif e.type in FOCUS_LOST and game.mode in ("play", "boom"):
+                game.set_paused(True)                  # clicked away: don't die while nobody's looking
         ready = total
         if not game.loaded:
             ready, total, msg = game.load_step()
@@ -1420,7 +1490,8 @@ def main():
             k = pygame.key.get_pressed()
             keys = {"left": k[pygame.K_LEFT], "right": k[pygame.K_RIGHT], "up": k[pygame.K_UP], "down": k[pygame.K_DOWN],
                     "jet": k[pygame.K_SPACE], "fire": k[pygame.K_LCTRL] or k[pygame.K_RCTRL] or k[pygame.K_z]}
-            game.update(dt, keys)
+            if not game.paused:
+                game.update(dt, keys)
             game.draw()
         game.fps = clock.get_fps() or game.fps
         pygame.display.flip()

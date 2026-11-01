@@ -9,26 +9,46 @@ jetpacking Jetman under tank-style controls. pygame 2 + numpy.
     python3 game.py --shot NAME [walk|high|fire|behind|far]   # -> ../lunar_poc/NAME.png
     python3 game.py --facings NAME                             # sprite sheet of all facings
     python3 game.py --bench
+    python3 game.py --selftest                     # quick headless checks of the game rules (PASS/FAIL)
+    python3 game.py --playthrough [LEVELS] [SEED]  # the robot in autoplay.py plays; one report line per level
+                                                   # (times, hits, rests and lives lost – used to tune the difficulty)
+    python3 tools/record_clip.py [OUT.mp4] [SECONDS] [SEED] [LEVEL]  # robot gameplay clip with sound (needs ffmpeg)
+
+Needs pygame-ce (or classic pygame 2) and numpy: `pip install -r requirements.txt`.
+With pygame-ce, shapes and effects are antialiased (`aa.py`); classic pygame falls back to plain drawing.
 
 ## Controls
 Left/Right turn · Up forward · Down back up · Space jetpack · Ctrl or Z fire · B drop the bomb ·
-F full screen · Esc back to the title screen · Enter starts a game
+P pause · F full screen · Esc twice quits to the title screen · Enter starts a game.
+The game also pauses by itself if the window loses focus.
 
 ## The game
 Pick up the bomb beside the rover (walk or fly into it), carry it to the Alien Missile
 Base (follow the red beacons) and drop it with B from above the dome – the force field
-lets the bomb through. On foot Jetman carries the bomb in front of him; in flight it
+lets the bomb through. A sloppy drop that misses the field is a miss: the bomb lands on the
+ground for you to pick up again; a bomb that lands hard against the field rolls clear so you
+can reach it. On foot Jetman carries the bomb in front of him; in flight it
 hangs under his boots. The base goes up, leaving a giant scorched crater, and the next
 level starts with a new kind of alien and the base in a new random spot 40–80 tiles from
 the rover. Beacons stand every 14 tiles; the ones on the line to the base glow red.
 
 - **Levels:** 1 Spore Hoppers · 2 Rock Creepers (ground crawlers that hunt you when you're
-  low) · 3 Void Rays (gliders that swoop at you) · 4+ all three, 15% faster each level.
+  low) · 3 Void Rays (gliders that cruise high and swoop at you) · 4+ all three, 15% faster each level.
+- **The base fights back:** it keeps a ring of Seeker Spores (glowing orange) circling over
+  the dome, and when you come within about 36 tiles it charges up (the dome glows) and
+  spits out more. Near the base, up to two at a time break off and home in on you – slow
+  enough to dodge or shoot, and each burns out after a few seconds. They can't come down
+  to the ground, so walking under them is safe. A spore hit costs stamina and, if you're
+  carrying the bomb, knocks it loose (it falls away from the base – pick it up again);
+  the rest of the spores pull back for a moment after a hit. More of them, a little
+  faster, on each level. They all fizzle out when the base goes up.
 - **Jetpack fuel:** 30 s of thrust per tank (about 195 tiles at top speed, so every base is
   well within one tank). Walking costs nothing.
 - **Stamina:** drains over 2.5 minutes, and each alien touch takes a bite (8/12/15).
-  At zero you lose a life (3 lives). Land on the rover roof to refuel and rest.
-- **Scoring:** Spore Hopper 100 · Rock Creeper 150 · Void Ray 250 · base destroyed
+  At zero you lose a life (3 lives). Land on the rover roof to refuel and rest. A beep
+  warns you at a quarter. After a respawn or a new level Jetman blinks for 2 s and
+  can't be hurt.
+- **Scoring:** Spore Hopper 100 · Rock Creeper 150 · Void Ray 250 · Seeker Spore 50 · base destroyed
   2,000 × level · 5 for each new 4×4-tile patch of ground explored.
 - **High scores:** an online Top 10 on dreamlo (as in Daleks in Hedges and Haunted Mansion),
   with country flags, a local fallback in `~/.moon_sweeper/`, and name entry when you make it.
@@ -45,6 +65,9 @@ the rover. Beacons stand every 14 tiles; the ones on the line to the base glow r
 - `game.py` – physics, effects, depth sort, silhouette, shots and bench.
 - `campaign.py` – the game: levels, bomb, fuel, stamina, lives, scoring, HUD, title
   screen, level cards, game over and name entry.
+- `autoplay.py` – a robot player using the real controls, for play-throughs and clips.
+- `selftest.py` – the `--selftest` checks.
+- `aa.py` – antialiased drop-ins for `pygame.draw` (pygame-ce), with safe fallbacks.
 - `scores.py` – dreamlo high-score table with an offline fallback and flags.
 - `sfx.py` – all sound effects, synthesised at start-up.
 - `assets/art/` – painted title art, bomb, Rock Creeper and Void Ray sprites
