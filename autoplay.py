@@ -19,8 +19,12 @@ class Bot:
     # how quickly he notices a spore, how often he taps fire when lined up, and how many he notices at all
     SKILLS = {"expert": (0.45, 0.35, 1.0), "novice": (0.9, 0.12, 0.6), "pacifist": (9e9, 0.0, 0.0)}
 
+    # stamina below which he heads back to the rover roof for a rest
+    REST_AT = {"expert": 45.0, "novice": 22.0, "pacifist": 35.0}
+
     def __init__(self, game, seed=1, skill="expert"):
         self.g = game
+        self.rest_at = self.REST_AT[skill]
         self.REACTION, self.FIRE_P, self.NOTICE = self.SKILLS[skill]
         self.ignored = set()
         self.shoots = skill != "pacifist"
@@ -45,6 +49,8 @@ class Bot:
         g = self.g
         best, bd = None, reach
         for a in g.aliens.values():
+            if not a.targetable:
+                continue
             d = math.hypot(a.x - g.x, a.y - g.y)
             if d < bd:
                 best, bd = a, d
@@ -65,8 +71,8 @@ class Bot:
         bx, by = g.world.base
         nearly_there = b.state == "carried" and math.hypot(bx - g.x, by - g.y) < 15
         if self.phase == "rest" and g.stamina > 95 and g.fuel > 95:
-            self.phase = "fly" if b.state == "carried" else "bomb"      # e.g. fresh after a lost life
-        if self.phase != "rest" and (g.stamina < 38 or g.fuel < 22) and not nearly_there \
+            self.phase = "fly" if b.state == "carried" else "bomb"
+        if self.phase != "rest" and (g.stamina < self.rest_at or g.fuel < 22) and not nearly_there \
                 and not getattr(g, "infinite", False):
             self.phase = "rest"
             st = getattr(self, "cur", None)
@@ -79,11 +85,12 @@ class Bot:
                 if g.stamina > 95 and g.fuel > 95:
                     self.phase = "fly" if b.state == "carried" else "bomb"
                 return k
-            self.steer(rx, ry, k, 0.1)
+            da = self.steer(rx, ry, k, 0.1)
             if dr > 0.35:
                 if alt < (60 if dr < 3 else 120) or g.vz < -80:
                     k["jet"] = 1
-                if dr > 0.6 or math.hypot(g.vx, g.vy) < 0.5:
+                # close in: only push on when facing the rover, or he circles it for ever
+                if (dr > 0.6 or math.hypot(g.vx, g.vy) < 0.5) and (dr > 1.5 or abs(da) < 0.15):
                     k["up"] = 1
                 if dr < 2.5 and math.hypot(g.vx, g.vy) > 2.0:
                     k.pop("up", None)
@@ -134,15 +141,17 @@ class Bot:
         if self.phase == "away":
             if alt < self.CRUISE:
                 k["jet"] = 1
+        if g.leech is not None and g.fuel > 3:
+            k["jet"] = 1                           # a leech on his back: burn hard to shake it off
         self.defend(k)
         return k
 
     def defend(self, k):
-        """A base spore closing in: turn to face it and shoot it down."""
+        """A base spore or a Glow Leech closing in: turn to face it and shoot it down."""
         g = self.g
         best, bd = None, 6.0
         for a in g.aliens.values():
-            if a.kind == "seeker":
+            if a.kind == "seeker" or (a.kind == "leech" and a.targetable and g.leech is None):
                 d = math.hypot(a.x - g.x, a.y - g.y)
                 if d < bd:
                     best, bd = a, d
@@ -173,9 +182,9 @@ def playthrough(game, levels=3, seed=1, max_level_time=240.0, draw=True, log=pri
     out = []
     while len(out) < levels:
         lvl = g.level
-        st = dict(level=lvl, time=0.0, hits=0, kills0=g.kills_level, lives_lost=0, min_stamina=100.0,
-                  fuel_at_drop=None, shots=0, score0=g.score, frame_ms=[])
-        hit_prev, lives_prev, n_las = g.hit_t, g.lives, g.laser_n
+        st = dict(level=lvl, time=0.0, hits=0, kills0=g.kills_level, min_stamina=100.0, latches=0,
+                  stamina_start=g.stamina, fuel_at_drop=None, shots=0, score0=g.score, frame_ms=[])
+        hit_prev, n_las, leech_prev = g.hit_t, g.laser_n, None
         bot.phase = "bomb"
         bot.cur = st
         pops0 = g.pops
@@ -194,9 +203,9 @@ def playthrough(game, levels=3, seed=1, max_level_time=240.0, draw=True, log=pri
             if g.hit_t < 0.05 <= hit_prev:
                 st["hits"] += 1
             hit_prev = g.hit_t
-            if g.lives < lives_prev:
-                st["lives_lost"] += 1
-            lives_prev = g.lives
+            if g.leech is not None and leech_prev is None:
+                st["latches"] += 1
+            leech_prev = g.leech
             st["min_stamina"] = min(st["min_stamina"], g.stamina)
             if bot.phase == "away" and st["fuel_at_drop"] is None:
                 st["fuel_at_drop"] = g.fuel
@@ -206,14 +215,16 @@ def playthrough(game, levels=3, seed=1, max_level_time=240.0, draw=True, log=pri
         st["shots"] = g.laser_n - n_las
         st["kills"] = g.pops - pops0
         st["score"] = g.score - st["score0"]
+        st["out_of_stamina"] = g.mode == "over" or g.mode == "dying"
         ms = sorted(st.pop("frame_ms")) or [0]
         st["frame_ms_median"] = ms[len(ms) // 2]
         st["frame_ms_99"] = ms[int(len(ms) * 0.99)]
         out.append(st)
-        log(f"level {lvl}: {st['time']:.1f} s, hits {st['hits']}, lives lost {st['lives_lost']}, min stamina "
+        log(f"level {lvl}: {st['time']:.1f} s, hits {st['hits']}, leech latches {st['latches']}, "
+            f"stamina {st['stamina_start']:.0f} at start, min "
             f"{st['min_stamina']:.0f}, fuel at drop {st['fuel_at_drop'] if st['fuel_at_drop'] is None else round(st['fuel_at_drop'])}, "
             f"shots {st['shots']}, kills {st['kills']}, rests {st['rests']}, score +{st['score']}, frame {st['frame_ms_median']:.1f}/{st['frame_ms_99']:.1f} ms"
-            + ("  STUCK" if st.get("stuck") else ""))
+            + ("  STUCK" if st.get("stuck") else "") + ("  OUT OF STAMINA: GAME OVER" if st["out_of_stamina"] else ""))
         if g.mode == "over" or st.get("stuck"):
             break
         while g.mode == "card":

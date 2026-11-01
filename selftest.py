@@ -35,7 +35,8 @@ def run(game_cls, screen):
                 g.draw()
 
     g.new_game()
-    check("new game starts in play", g.mode == "play" and g.lives == 3 and g.level == 1)
+    check("new game starts in play, full stamina and no lives", g.mode == "play" and g.level == 1
+          and g.stamina == cp.STAMINA_MAX and not hasattr(g, "lives"))
     run_for(0.5, draw=True)
     check("safe after start", g.safe_t > 0)
     st = g.stamina
@@ -89,7 +90,7 @@ def run(game_cls, screen):
                     return x, y
         return sx, sy
 
-    def shoot_at(kind, dist, alt, off_deg, z=None):
+    def shoot_at(kind, dist, alt, off_deg, z=None, prep=None):
         g.x, g.y = clear_line(0.9, dist)
         g.vx = g.vy = g.vz = 0.0
         g.update_aliens(0.0)                              # let the chunks here release their aliens...
@@ -99,6 +100,8 @@ def run(game_cls, screen):
         ax, ay = g.x + math.cos(0.9) * dist, g.y + math.sin(0.9) * dist
         a = al.make_alien(("selftest", kind), ax, ay, kind, "green", 1, 3)
         a.z = g.world.floor_at(ax, ay) if z is None else z
+        if prep:
+            prep(a)
         a.update = lambda *args, **kw: None               # stands still for the test
         g.aliens[a.uid] = a
         g.a, g.cool = 0.9 + math.radians(off_deg), 0.0
@@ -116,6 +119,111 @@ def run(game_cls, screen):
     check("a crawler can't be hit from high above", not shoot_at("creeper", 5.0, 160, 0))
     check("a Void Ray far above the beam isn't helped down", not shoot_at("flyer", 5.0, 0, 0, z=200.0))
     check("a Void Ray level with the beam is hit", shoot_at("flyer", 5.0, 150, 0, z=170.0))
+
+    # the level 4-6 aliens can all be shot (with the aim help)
+    def reared(a):
+        a.state, a.rise, a.targetable, a.harmful = "up", 1.0, True, True
+
+    def armed(a):
+        a.state, a.targetable = "armed", True
+    check("Crater Worm: reared up, it can be shot from the ground", all(shoot_at("worm", d, 0, 0, prep=reared) for d in (2.5, 5.0)))
+    check("Crater Worm: reared up, a little off the line", shoot_at("worm", 5.0, 0, 6, prep=reared))
+    check("Crater Worm: can't be shot while it tunnels", not shoot_at("worm", 4.0, 0, 0))
+    check("Glow Leech: hit at chest height", shoot_at("leech", 5.0, 0, 0, z=60.0) and shoot_at("leech", 5.0, 120, 0, z=180.0))
+    check("Mine Beetle: hit in the air", shoot_at("beetle", 5.0, 90, 0, z=170.0) and shoot_at("beetle", 4.0, 0, 0, z=80.0))
+    check("Spore Mine: shot on the ground from a distance", shoot_at("mine", 5.0, 0, 0, prep=armed))
+
+    # each new alien turns up first on its own level, and the game spawns it there
+    def kinds_at(level, n=14):
+        out = set()
+        for ci in range(-n, n):
+            for cj in range(-n, n):
+                out |= {e[3] for e in al.chunk_aliens_level(ci, cj, level)}
+        return out
+    for lvl, kind, cls in ((4, "worm", al.Worm), (5, "leech", al.Leech), (6, "beetle", al.Beetle)):
+        earlier = set().union(*(kinds_at(L) for L in range(1, lvl)))
+        g.new_game()
+        g.level = lvl
+        e = next(e for ci in range(-14, 14) for cj in range(-14, 14)
+                 for e in al.chunk_aliens_level(ci, cj, lvl) if e[3] == kind)
+        g.aliens.clear(); g.spawned.clear(); g.killed.clear()
+        g.x, g.y = e[1] + 4.0, e[2]                        # near, but not on top of it
+        g.update_aliens(0.0)
+        here = [a for a in g.aliens.values() if isinstance(a, cls)]
+        check(f"level {lvl}: {al.KIND_NAMES[kind]} spawn (and never before level {lvl})",
+              kind in kinds_at(lvl) and kind not in earlier and bool(here) and al.level_new_kind(lvl) == kind)
+
+    # stamina is the only measure: aliens bite chunks out of it, with a short grace after each bite
+    def fresh(level=1):
+        g.new_game()
+        g.level = level
+        g.aliens.clear()
+        fi, fj = math.floor(g.x / al.wd.CHUNK), math.floor(g.y / al.wd.CHUNK)
+        for di in range(-3, 4):
+            for dj in range(-3, 4):
+                g.spawned.add((fi + di, fj + dj))          # no wild aliens: just the test's own
+        g.safe_t, g.hit_t = 0.0, 9.0
+        g.vx = g.vy = g.vz = 0.0
+    fresh()
+    a = al.make_alien(("selftest", "bite"), g.x + 0.3, g.y, "creeper", "green", 1, 2)
+    a.z = g.floor()
+    a.update = lambda *args, **kw: None
+    g.aliens[a.uid] = a
+    st = g.stamina
+    run_for(2 / 60)
+    bite = st - g.stamina
+    check("an alien bite takes stamina", al.KINDS["creeper"][3] * 0.8 < bite < al.KINDS["creeper"][3] * 1.5 and g.mode == "play",
+          f"-{bite:.1f}")
+    a.hit_cool = 0.0
+    a.x, a.y = g.x + 0.3, g.y
+    st = g.stamina
+    run_for(2 / 60)
+    check("no second bite inside the grace period", g.stamina > st - 1.0, f"-{st - g.stamina:.1f}")
+    g.aliens.clear()
+    # a Crater Worm bursting out under him
+    fresh(4)
+    w = al.make_alien(("selftest", "worm"), g.x + 0.5, g.y, "worm", "green", 1, 4)
+    w.state, w.t, w.cool = "rise", 0.0, 0.0
+    g.aliens[w.uid] = w
+    st = g.stamina
+    for _ in range(int((al.WORM_RISE + 0.15) * 60)):
+        w.x, w.y = g.x + 0.5, g.y
+        g.update(1 / 60, idle)
+    check("a Crater Worm bursting out bites him", g.stamina < st - 10 and w.state in ("up", "dive"), f"-{st - g.stamina:.1f} {w.state}")
+    g.aliens.clear()
+    # a Glow Leech: latches on, drains, and a good burst of jetpack shakes it off
+    fresh(5)
+    lc = al.make_alien(("selftest", "leech"), g.x + 0.2, g.y, "leech", "green", 1, 5)
+    lc.z = g.z + 40
+    g.aliens[lc.uid] = lc
+    run_for(3 / 60)
+    check("a Glow Leech latches on", g.leech is lc and lc.state == "latched", f"{lc.state}")
+    st = g.stamina
+    run_for(1.0)
+    check("a latched leech drains stamina", st - g.stamina > al.LEECH_DRAIN * 0.8, f"-{st - g.stamina:.1f} in 1 s")
+    run_for(al.LEECH_SHAKE + 0.3, dict(idle, jet=1))
+    check("the jetpack shakes a leech off", g.leech is None and lc.state != "latched", f"{lc.state}")
+    g.aliens.clear()
+    # a Spore Mine going off next to him
+    fresh(6)
+    g.z, g.vz = g.floor(), 0.0
+    m = al.Mine(("mine", "selftest"), g.x + 0.6, g.y, g.floor())
+    m.state, m.t, m.floor, m.age = "armed", 0.0, g.floor(), 0.0
+    g.aliens[m.uid] = m
+    st = g.stamina
+    run_for(al.MINE_FUSE + 0.2)
+    check("a Spore Mine goes off when he comes close, and hurts", m.uid not in g.aliens and st - g.stamina > al.MINE_HIT * 0.9,
+          f"-{st - g.stamina:.1f}")
+    g.aliens.clear()
+    # the HUD: the stamina meter shows how much is left
+    fresh(1)
+    g.safe_t = 99.0
+    g.stamina = cp.STAMINA_MAX
+    g.draw(); full = g.screen.subsurface((0, 0, g.screen.get_width(), 44)).copy()
+    g.stamina = cp.STAMINA_MAX * 0.15
+    g.draw(); low = g.screen.subsurface((0, 0, g.screen.get_width(), 44)).copy()
+    diff = sum(1 for x in range(0, full.get_width(), 2) for y in range(0, 44, 2) if full.get_at((x, y)) != low.get_at((x, y)))
+    check("HUD stamina meter shows the stamina left", diff > 40, f"{diff} px changed")
 
     # the Alien Missile Base and its spores
     def seekers():
@@ -183,17 +291,45 @@ def run(game_cls, screen):
     g.handle_key(_key(pygame.K_ESCAPE)); g.handle_key(_key(pygame.K_ESCAPE))
     check("Esc twice quits to the title", g.mode == "title")
 
-    # losing every life ends the game
+    # the title screen: twinkling stars only on black sky, never over the Earth
+    g.mode, g.title_t = "title", 0.0
+    W, H = g.screen.get_size()
+    ok, worst, n_stars = True, 0, 0
+    for t in (0.0, 3.7, 11.2, 25.0, 47.5, 80.0):
+        g.title_t = t
+        g.title_twinkle = False
+        g.draw_title(True, 1.0)
+        plain = g.screen.copy()
+        g.title_twinkle = True
+        g.draw_title(True, 1.0)
+        big = g.title_bg[0]
+        ox, oy = g.title_offset(big, t)
+        ex, ey, er = g.title_earth(big)
+        ex, ey = ex + ox, ey + oy
+        for r in g.title_star_rects:
+            n_stars += 1
+            if (r[0] - ex) ** 2 + (r[1] - ey) ** 2 < (er + 6) ** 2:
+                ok = False
+        for y in range(int(ey - er - 4), int(ey + er + 5)):
+            for x in range(int(ex - er - 4), int(ex + er + 5)):
+                if 0 <= x < W and 0 <= y < H and (x - ex) ** 2 + (y - ey) ** 2 <= (er + 4) ** 2:
+                    d = sum(abs(p - q) for p, q in zip(g.screen.get_at((x, y))[:3], plain.get_at((x, y))[:3]))
+                    worst = max(worst, d)
+    check("title stars are never drawn over the Earth", ok and worst == 0 and n_stars > 20,
+          f"{n_stars} stars drawn, Earth changed by {worst}")
+    g.title_twinkle = True
+
+    # running out of stamina ends the game (there are no lives)
     g.new_game()
-    for _ in range(3):
-        run_for(2.1)
-        g.stamina = 0.0
-        run_for(0.05)
-        for _ in range(600):
-            if g.mode == "play":
-                break
-            g.update(1 / 60, idle)
-    check("three lives lost: game over", g.mode == "over", g.mode)
+    run_for(2.1)
+    g.stamina = 0.0
+    run_for(0.05)
+    check("out of stamina: Jetman is exhausted", g.mode == "dying", g.mode)
+    for _ in range(600):
+        if g.mode == "over":
+            break
+        g.update(1 / 60, idle)
+    check("out of stamina: game over", g.mode == "over" and "stamina" in g.over_reason, f"{g.mode} {g.over_reason!r}")
     g.draw()
     print(f"{'ALL PASSED' if not fails else str(len(fails)) + ' FAILED'} in {time.time() - t0:.1f} s", flush=True)
     return len(fails)

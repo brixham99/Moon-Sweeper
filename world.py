@@ -409,13 +409,34 @@ class World:
             return True
         if z < bs.height_at(self.base[0], self.base[1], x, y, rad) * 0.95:
             return True
-        ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
-        for di in (-1, 0, 1):
-            for dj in (-1, 0, 1):
-                for rk in self.chunk_rocks(ci + di, cj + dj):
-                    if z < rk.h * 0.9 and (rk.x - x) ** 2 + (rk.y - y) ** 2 < (rk.size * 0.48 + rad) ** 2:
-                        return True
+        for rk in self.near_rocks(int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))):
+            if z < rk.h * 0.9 and (rk.x - x) ** 2 + (rk.y - y) ** 2 < (rk.size * 0.48 + rad) ** 2:
+                return True
         return False
+
+    def near_rocks(self, ci, cj):
+        """Every boulder in chunk (ci, cj) and its eight neighbours, as one list (cached until the
+        boulders change: a new base site or a blast)."""
+        nc = self.__dict__.get("_near")
+        if nc is None or nc[0] is not self.rocks:
+            nc = self._near = (self.rocks, {})
+        out = nc[1].get((ci, cj))
+        if out is None:
+            out = []
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    out += self.chunk_rocks(ci + di, cj + dj)
+            if len(nc[1]) > 200:
+                nc[1].clear()
+            nc[1][(ci, cj)] = out
+        return out
+
+    def pinned(self, ci, cj):
+        """Chunks never evicted: the ones round the rover, where every level starts and Jetman
+        keeps coming back to rest (rebuilding them stalled the first frame of each level)."""
+        rx, ry = self.rover
+        ri, rj = int(math.floor(rx / CHUNK)), int(math.floor(ry / CHUNK))
+        return abs(ci - ri) <= 1 and abs(cj - rj) <= 1
 
     def beacons_in(self, x0, y0, x1, y1):
         """Beacon positions in a tile rectangle (none on the rover or the base)."""
@@ -444,11 +465,9 @@ class World:
     def _floor_at(self, x, y):
         ci, cj = int(math.floor(x / CHUNK)), int(math.floor(y / CHUNK))
         f = max(rv.height_at(self.rover[0], self.rover[1], x, y, 0.3), bs.height_at(self.base[0], self.base[1], x, y))
-        for di in (-1, 0, 1):
-            for dj in (-1, 0, 1):
-                for rk in self.chunk_rocks(ci + di, cj + dj):
-                    if (rk.x - x) ** 2 + (rk.y - y) ** 2 < (rk.size * 0.42) ** 2:
-                        f = max(f, rk.h * 0.92)
+        for rk in self.near_rocks(ci, cj):
+            if (rk.x - x) ** 2 + (rk.y - y) ** 2 < (rk.size * 0.42) ** 2:
+                f = max(f, rk.h * 0.92)
         return f
 
     # ------------------------------------------------------------ ground
@@ -505,6 +524,11 @@ class World:
             if res is not None:
                 self.pending.pop(k, None)
         if res is None and crs is not None:
+            if not wait:                            # leave it to the builders
+                with self.lock:
+                    self.queue[k] = crs
+                self.wake.set()
+                return None
             res = ground_pixels(ci, cj, crs)       # not started yet: build it now
         elif res is None and k in self.pending:
             if not wait:
@@ -597,10 +621,11 @@ class World:
             self.rock_pending.pop(k).cancel(); self.rock_queue.pop(k, None)
         self.rock_done = {k for k in self.rock_done if abs(k[0] - ci) <= keep and abs(k[1] - cj) <= keep}
         for store in (self.ground, self.rocks):
-            for k in [k for k in store if abs(k[0] - ci) > keep or abs(k[1] - cj) > keep]:
+            for k in [k for k in store if (abs(k[0] - ci) > keep or abs(k[1] - cj) > keep) and not self.pinned(*k)]:
                 if store is self.rocks:
                     for rk in store[k]:
                         self.sprites.pop(rk.key, None)
                 del store[k]
-        for k in [k for k in self.raw if abs(k[0] - ci) > keep + 1 or abs(k[1] - cj) > keep + 1]:
+        for k in [k for k in self.raw if (abs(k[0] - ci) > keep + 1 or abs(k[1] - cj) > keep + 1)
+                  and not (abs(k[0] - math.floor(self.rover[0] / CHUNK)) <= 2 and abs(k[1] - math.floor(self.rover[1] / CHUNK)) <= 2)]:
             del self.raw[k]

@@ -170,12 +170,133 @@ def warn():
     return _norm(np.concatenate(parts), 0.6)
 
 
+# ---------------------------------------------------------------- level 4-6 aliens
+def rumble():
+    """A Crater Worm about to surface: a deep grinding growl that swells, with grit."""
+    t = _t(0.6)
+    n = len(t)
+    growl = np.sin(2 * np.pi * np.cumsum(48 + 30 * t / 0.6 + 6 * np.sin(2 * np.pi * 11 * t)) / RATE)
+    grit = _lowpass(rng.standard_normal(n), 420) * 2.2
+    crackle = (rng.random(n) < 0.004) * rng.standard_normal(n) * 1.5
+    x = np.tanh(1.8 * (growl + grit + crackle)) * (t / 0.6) ** 1.2
+    return _norm(x * _env(n, 0.01, 0.08), 0.8)
+
+
+def erupt():
+    """It bursts out: a crunch of rock, a wet snap of jaws and a rising shriek."""
+    t = _t(0.55)
+    n = len(t)
+    crunch = _lowpass(rng.standard_normal(n), 1400 + 2000 * np.exp(-t * 12)) * np.exp(-t * 9) * 3
+    thump = np.sin(2 * np.pi * np.cumsum(90 * np.exp(-t * 7) + 40) / RATE) * np.exp(-t * 8) * 1.5
+    shriek = np.sin(2 * np.pi * np.cumsum(500 + 900 * np.clip((t - 0.08) / 0.3, 0, 1)) / RATE)
+    shriek = np.tanh(2.5 * shriek) * 0.35 * np.clip((t - 0.06) * 12, 0, 1) * np.exp(-np.clip(t - 0.3, 0, None) * 9)
+    snap = np.zeros(n); i = int(0.11 * RATE); snap[i:i + 300] = rng.standard_normal(300) * np.linspace(2.5, 0, 300)
+    return _norm((crunch + thump + shriek + snap) * _env(n, 0.001, 0.12), 0.85)
+
+
+def dive():
+    """And back down: a short slithering hiss with a low gulp."""
+    t = _t(0.35)
+    hiss = _lowpass(rng.standard_normal(len(t)), 900) * np.exp(-t * 6)
+    gulp = np.sin(2 * np.pi * np.cumsum(180 - 120 * t / 0.35) / RATE) * np.exp(-t * 7) * 0.7
+    return _norm((hiss + gulp) * _env(len(t), 0.01, 0.1), 0.6)
+
+
+def latch():
+    """A Glow Leech clamps on: a slap, then a wet sucking squelch."""
+    t = _t(0.5)
+    n = len(t)
+    slap = _lowpass(rng.standard_normal(n), 2200) * np.exp(-t * 40) * 3
+    f = 260 - 140 * (t / 0.5) + 30 * np.sin(2 * np.pi * 17 * t)
+    suck = np.sin(2 * np.pi * np.cumsum(f) / RATE) * (0.5 + 0.5 * np.sin(2 * np.pi * 9 * t) ** 2)
+    suck *= np.clip(t * 10, 0, 1)
+    gurgle = _lowpass(rng.standard_normal(n), 500) * 0.8 * (0.5 + 0.5 * np.sin(2 * np.pi * 13 * t))
+    return _norm((slap + suck + gurgle) * _env(n, 0.001, 0.15), 0.8)
+
+
+def suck():
+    """While it feeds: a short low slurp, repeated."""
+    t = _t(0.28)
+    f = 150 + 90 * np.sin(np.pi * t / 0.28)
+    x = np.sin(2 * np.pi * np.cumsum(f) / RATE) + _lowpass(rng.standard_normal(len(t)), 600) * 0.9
+    return _norm(x * np.sin(np.pi * t / 0.28) ** 2, 0.6)
+
+
+def shake():
+    """Shaken off: a rubbery pop and a dazed falling warble."""
+    t = _t(0.45)
+    pop_ = np.sin(2 * np.pi * np.cumsum(700 * np.exp(-t * 25) + 200) / RATE) * np.exp(-t * 18)
+    warble = np.sin(2 * np.pi * np.cumsum(900 - 600 * t / 0.45 + 120 * np.sin(2 * np.pi * 14 * t)) / RATE) * 0.4
+    return _norm((pop_ + warble * np.clip(t * 8, 0, 1)) * _env(len(t), 0.001, 0.15), 0.6)
+
+
+def glub():
+    """A Glow Leech drifting nearby: a soft hollow bloop."""
+    t = _t(0.3)
+    f = 220 + 260 * (1 - np.exp(-t * 14))
+    x = np.sin(2 * np.pi * np.cumsum(f) / RATE) * np.exp(-t * 9)
+    return _norm(x * _env(len(t), 0.004, 0.08), 0.5)
+
+
+def buzz():
+    """A Mine Beetle's wings: a raspy, slightly detuned buzz burst."""
+    t = _t(0.3)
+    ph = 2 * np.pi * np.cumsum(118 + 6 * np.sin(2 * np.pi * 7 * t)) / RATE
+    saw = ((ph / (2 * np.pi)) % 1.0) * 2 - 1
+    saw2 = ((ph * 1.013 / (2 * np.pi)) % 1.0) * 2 - 1
+    x = (saw + saw2) * (0.6 + 0.4 * np.sin(2 * np.pi * 31 * t))
+    x = x - _lowpass(x, 150)
+    return _norm(x * np.sin(np.pi * t / 0.3), 0.5)
+
+
+def thud():
+    """A mine hits the ground: a dull plop."""
+    t = _t(0.18)
+    x = np.sin(2 * np.pi * np.cumsum(160 * np.exp(-t * 15) + 70) / RATE) * np.exp(-t * 20)
+    x += _lowpass(rng.standard_normal(len(t)), 700) * np.exp(-t * 35)
+    return _norm(x * _env(len(t), 0.001, 0.05), 0.6)
+
+
+def arm():
+    """A mine arms itself: a rising two-tone chirp."""
+    parts = []
+    for f in (1200.0, 1800.0):
+        t = _t(0.06)
+        parts += [np.sin(2 * np.pi * f * t) * _env(len(t), 0.003, 0.03), np.zeros(int(RATE * 0.03))]
+    return _norm(np.concatenate(parts), 0.45)
+
+
+def fuse():
+    """A mine about to go: frantic beeping, getting faster."""
+    out = []
+    gap = 0.07
+    for i in range(6):
+        t = _t(0.035)
+        out += [np.sign(np.sin(2 * np.pi * 2100 * t)) * 0.5 * _env(len(t), 0.002, 0.01), np.zeros(int(RATE * gap))]
+        gap *= 0.75
+    return _norm(np.concatenate(out), 0.5)
+
+
+def blast():
+    """A mine going off: a sharp crack and a short rumble (much smaller than the base's boom)."""
+    t = _t(0.9)
+    n = len(t)
+    crack = rng.standard_normal(n) * np.exp(-t * 60) * 3
+    body = _lowpass(rng.standard_normal(n), 250 + 2500 * np.exp(-t * 9)) * np.exp(-t * 4.5) * 3
+    sub = np.sin(2 * np.pi * np.cumsum(45 + 70 * np.exp(-t * 8)) / RATE) * np.exp(-t * 4)
+    return _norm(np.tanh(1.5 * (crack + body + sub * 1.3)) * _env(n, 0.001, 0.4), 0.9)
+
+
 BUILDERS = {"thrust": thrust, "phaser": phaser, "hurt": hurt, "bounce": bounce, "spin": spin, "pop": pop,
             "boom": boom, "pickup": pickup, "drop": drop, "levelup": levelup, "warn": warn,
-            "spit": spit, "seek": seek}
+            "spit": spit, "seek": seek, "rumble": rumble, "erupt": erupt, "dive": dive, "latch": latch,
+            "suck": suck, "shake": shake, "glub": glub, "buzz": buzz, "thud": thud, "arm": arm, "fuse": fuse,
+            "blast": blast}
 GAIN = {"thrust": 0.55, "phaser": 0.45, "hurt": 0.9, "bounce": 0.3, "spin": 0.18, "pop": 0.48,
         "boom": 1.0, "pickup": 0.5, "drop": 0.45, "levelup": 0.55, "warn": 0.4,
-        "spit": 0.42, "seek": 0.2}   # alien sounds at 60%
+        "spit": 0.42, "seek": 0.2,   # alien sounds at 60%
+        "rumble": 0.45, "erupt": 0.48, "dive": 0.3, "latch": 0.55, "suck": 0.3, "shake": 0.4, "glub": 0.2,
+        "buzz": 0.16, "thud": 0.3, "arm": 0.25, "fuse": 0.35, "blast": 0.7}
 
 
 def build_all():

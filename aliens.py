@@ -132,6 +132,7 @@ CHASE_RANGE = 7.0
 
 class Alien:
     kind = "spore"
+    targetable = harmful = True
 
     def __init__(self, uid, x, y, variant, rng_seed):
         self.uid = uid
@@ -202,7 +203,7 @@ def chunk_aliens(ci, cj):
     """Deterministic spawn list for a chunk: (uid, x, y, variant, seed)."""
     r = wd.chunk_rng(ci, cj, 21)
     out = []
-    for i in range(r.choice((0, 0, 1, 1, 1, 2, 2))):
+    for i in range(r.choice((0, 0, 1, 1, 1, 2, 2) if level < 4 else (0, 1, 1, 1, 2, 2, 2, 3))):
         out.append(((ci, cj, i), ci * wd.CHUNK + r.uniform(1, wd.CHUNK - 1), cj * wd.CHUNK + r.uniform(1, wd.CHUNK - 1),
                     r.choice(NAMES), r.randrange(1 << 30)))
     return out
@@ -216,14 +217,26 @@ import os
 ART = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "art")
 KINDS = {
     #  kind       file           width px  points  stamina hit  splat colour     reach (tiles)  body (px up)
-    "spore":   (None,           None,     100,    8,           None,            0.55,          22),
+    "spore":   (None,           None,     100,    10,          None,            0.55,          22),
     "creeper": ("creeper.png",  78,       150,    12,          (200, 110, 40),  0.7,           14),
     "flyer":   ("flyer.png",    104,      250,    15,          (70, 200, 220),  0.75,          16),
-    "seeker":  (None,           None,     50,     10,          None,            0.5,           14),
+    "seeker":  (None,           None,     50,     12,          None,            0.5,           14),
+    "worm":    ("worm.png",     60,       200,    16,          (190, 120, 60),  0.6,           44),
+    "leech":   ("leech.png",    56,       300,    5,           (90, 220, 150),  0.55,          22),
+    "beetle":  ("beetle.png",   100,      350,    12,          (170, 210, 60),  0.7,           14),
+    "mine":    (None,           None,     25,     0,           (170, 230, 70),  0.0,           7),
 }
 CREEPER_SHEET, CREEPER_FRAMES, CREEPER_PAD = "creeper_walk.png", 8, 6
 CREEPER_STRIDE = 0.42        # tiles travelled per full scuttle cycle (keeps the feet from sliding)
-KIND_NAMES = {"spore": "Spore Hoppers", "creeper": "Rock Creepers", "flyer": "Void Rays", "seeker": "Seeker Spores"}
+KIND_NAMES = {"spore": "Spore Hoppers", "creeper": "Rock Creepers", "flyer": "Void Rays", "seeker": "Seeker Spores",
+              "worm": "Crater Worms", "leech": "Glow Leeches", "beetle": "Mine Beetles", "mine": "Spore Mines"}
+KIND_TIPS = {      # one line for the level card and the level's intro banner
+    "creeper": "They scuttle along the ground. Shoot them from the ground, too.",
+    "flyer": "They glide high and swoop. Meet them at their height.",
+    "worm": "They burrow under you and burst out. Watch for the moving mound, then shoot them when they rear up.",
+    "leech": "They latch on and drain your stamina. Fire the jetpack hard to shake one off, then shoot it.",
+    "beetle": "They drop glowing mines where you are heading. Stay airborne, or shoot the mines from a distance.",
+}
 
 
 class PaintedSprites:
@@ -270,7 +283,13 @@ class PaintedSprites:
         if qy != 1 or qx != 1:
             s = pygame.transform.smoothscale(s, (max(1, int(s.get_width() * qx)), max(1, int(s.get_height() * qy))))
         w, h = s.get_size()
-        out = (s, w / 2, h - (2 + self.pad * qy if kind == "creeper" else h * 0.35))
+        if kind == "creeper":
+            ay = h - 2 - self.pad * qy
+        elif kind == "worm":                       # ground contact: the middle of its rubble ring
+            ay = h - 9 * qy
+        else:                                      # floating: the point under the body's centre
+            ay = h - h * 0.35
+        out = (s, w / 2, ay)
         self.cache[k] = out
         return out
 
@@ -279,6 +298,7 @@ class Creeper:
     """Level 2: a low armoured crawler. It scuttles over the ground, can't climb the rover or
     boulders (it turns away), and hunts Jetman when he's on or near the ground."""
     kind = "creeper"
+    targetable = harmful = True
 
     def __init__(self, uid, x, y, seed, speed=1.0):
         self.uid, self.x, self.y, self.z = uid, x, y, 0.0
@@ -331,6 +351,7 @@ class Creeper:
 class Flyer:
     """Level 3: a ray that glides at altitude, then swoops at Jetman and climbs away."""
     kind = "flyer"
+    targetable = harmful = True
 
     def __init__(self, uid, x, y, seed, speed=1.0):
         self.uid, self.x, self.y = uid, x, y
@@ -409,6 +430,7 @@ class Seeker:
     so you can dodge it, outrun it or shoot it. It glows and warbles so you know it's there."""
     kind = "seeker"
     variant = "seeker"
+    targetable = harmful = True
     hunting = 0                  # how many are chasing him right now (the campaign counts them each frame)
 
     def __init__(self, uid, bx, by, z, ang, level, rng_seed=0, armed=False):
@@ -496,18 +518,350 @@ class Seeker:
         return p, p
 
 
-LEVEL_MIX = {1: [("spore", 1.0)], 2: [("creeper", 0.75), ("spore", 0.25)], 3: [("flyer", 0.6), ("creeper", 0.4)]}
+# ---------------------------------------------------------------- level 4, 5 and 6 aliens
+WORM_RISE, WORM_UP, WORM_DIVE = 0.55, 1.7, 0.35     # s: rumble warning, reared up, sinking back
+WORM_REACH = 1.15                                   # tiles: the bite as it bursts out
+WORM_ALT = 60.0                                     # px: hover higher than this and it can't reach you
+
+
+class Worm:
+    """Level 4: a Crater Worm. It tunnels under the regolith (a travelling mound of rubble:
+    you can't shoot it there and it can't hurt you), follows a Jetman who stays low, then
+    rumbles for a moment and bursts out beneath him. Reared up it can be shot, until it dives."""
+    kind = "worm"
+    variant = "worm"
+
+    def __init__(self, uid, x, y, seed, speed=1.0):
+        self.uid, self.x, self.y, self.z = uid, x, y, 0.0
+        self.rng = random.Random(seed)
+        self.heading = self.rng.uniform(0, math.tau)
+        self.speed = speed
+        self.vx = self.vy = self.vz = 0.0
+        self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
+        self.spin, self.spin_rate = self.rng.uniform(0, 10), 0.0
+        self.state, self.t = "under", 0.0
+        self.cool = self.rng.uniform(1.0, 3.0)
+        self.rise = 0.0                          # 0 buried .. 1 fully reared up
+        self.face = 1.0
+        self.rubble_t = 0.0
+        self.targetable = self.harmful = False
+
+    def update(self, dt, world, jx, jy, events, jz=0.0):
+        self.hit_cool -= dt
+        self.t += dt
+        self.spin += dt * 6
+        dx, dy = jx - self.x, jy - self.y
+        d = math.hypot(dx, dy)
+        low = jz - world.floor_at(jx, jy) < WORM_ALT
+        if self.state == "under":
+            self.cool -= dt
+            hunting = d < 14.0 and low
+            if hunting:
+                want = math.atan2(dy, dx)
+                diff = (want - self.heading + math.pi) % math.tau - math.pi
+                self.heading += max(-2.2 * dt, min(2.2 * dt, diff))
+            elif self.rng.random() < dt * 0.5:
+                self.heading += self.rng.uniform(-1.2, 1.2)
+            sp = (2.5 if hunting else 1.0) * self.speed
+            self.vx, self.vy = math.cos(self.heading) * sp, math.sin(self.heading) * sp
+            nx, ny = self.x + self.vx * dt, self.y + self.vy * dt
+            if world.blocked(nx, ny, 0.0, 0.3):              # tunnels round boulders, the rover and the base
+                self.heading += self.rng.choice((1, -1)) * self.rng.uniform(1.4, 2.4)
+            else:
+                self.x, self.y = nx, ny
+            self.rubble_t -= dt
+            if self.rubble_t <= 0:
+                self.rubble_t = 0.09
+                events.append(("rubble", self))
+            if self.cool <= 0 and ((hunting and d < 1.5) or (not hunting and self.rng.random() < dt * 0.12)):
+                self.state, self.t = "rise", 0.0
+                events.append(("rumble", self))
+        elif self.state == "rise":                           # the warning: the mound heaves and rumbles
+            if self.t >= WORM_RISE:
+                self.state, self.t = "up", 0.0
+                self.hit_cool = 0.0
+                events.append(("erupt", self))
+        elif self.state == "up":
+            self.rise = min(1.0, self.t / 0.16)
+            if abs(dx - dy) > 0.2:
+                self.face = 1.0 if dx - dy > 0 else -1.0     # rears towards him on screen
+            if self.t >= WORM_UP:
+                self.state, self.t = "dive", 0.0
+                events.append(("dive", self))
+        elif self.state == "dive":
+            self.rise = max(0.0, 1.0 - self.t / WORM_DIVE)
+            if self.t >= WORM_DIVE:
+                self.state, self.t, self.rise = "under", 0.0, 0.0
+                self.cool = self.rng.uniform(2.0, 3.5)
+        self.targetable = self.state in ("up", "dive") and self.rise > 0.35
+        self.harmful = self.state == "up"
+        self.floor = world.floor_at(self.x, self.y)
+        self.z = self.floor
+
+    def flip(self):
+        return self.face < 0                     # the painting faces right (its maw opens east)
+
+    def squash(self):
+        if self.state == "up":
+            return 1.0, 1.0 + 0.05 * math.sin(self.spin * 1.7)
+        return 1.0, 1.0
+
+
+LEECH_DRAIN = 6.0          # stamina per second while one is latched on
+LEECH_SHAKE = 1.0          # s of jetpack thrust that shakes a latched leech off
+LEECH_DAZE = 2.6           # s it drifts, stunned, after being shaken off
+
+
+class Leech:
+    """Level 5: a Glow Leech. A slow, drifting jellyfish that homes in on Jetman at chest height.
+    If it touches him it latches on and drains his stamina until he shakes it off with a good
+    burst of jetpack (or lands on the rover roof). Shaken off, it tumbles dazed and is easy to hit."""
+    kind = "leech"
+    variant = "leech"
+
+    def __init__(self, uid, x, y, seed, speed=1.0):
+        self.uid, self.x, self.y = uid, x, y
+        self.rng = random.Random(seed)
+        self.heading = self.rng.uniform(0, math.tau)
+        self.speed = speed
+        self.hover = self.rng.uniform(45.0, 120.0)
+        self.z = self.hover
+        self.vx = self.vy = self.vz = 0.0
+        self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
+        self.spin, self.spin_rate = self.rng.uniform(0, 10), 0.0
+        self.state, self.t = "drift", 0.0
+        self.shake = 0.0
+        self.glub_t = self.rng.uniform(1, 3)
+        self.targetable = self.harmful = True
+
+    def update(self, dt, world, jx, jy, events, jz=0.0):
+        self.hit_cool -= dt
+        self.spin += dt * 3.0
+        self.t += dt
+        if self.state == "latched":                  # the game carries it about on his back
+            return
+        dx, dy = jx - self.x, jy - self.y
+        d = math.hypot(dx, dy)
+        fl = world.floor_at(self.x, self.y)
+        if self.state == "dazed":
+            sp, tz = 0.6, fl + 22
+            self.heading += dt * 2.0
+            if self.t >= LEECH_DAZE:
+                self.state, self.t = "drift", 0.0
+        elif d < 13.0:
+            want = math.atan2(dy, dx)
+            diff = (want - self.heading + math.pi) % math.tau - math.pi
+            self.heading += max(-2.0 * dt, min(2.0 * dt, diff))
+            sp = 2.9 * self.speed
+            tz = max(fl + 30, min(fl + 250, jz + 40))
+        else:
+            if self.rng.random() < dt * 0.4:
+                self.heading += self.rng.uniform(-1.0, 1.0)
+            sp, tz = 0.8, fl + self.hover
+        self.vx, self.vy = math.cos(self.heading) * sp, math.sin(self.heading) * sp
+        nx, ny = self.x + self.vx * dt, self.y + self.vy * dt
+        if world.blocked(nx, ny, self.z, 0.25):
+            self.heading += math.pi * 0.6
+        else:
+            self.x, self.y = nx, ny
+        self.vz += ((tz + 8 * math.sin(self.spin)) - self.z) * 1.4 * dt - self.vz * min(1.0, dt * 2.5)
+        self.z += self.vz * dt
+        self.floor = world.floor_at(self.x, self.y)
+        self.z = max(self.z, self.floor + 12)
+        self.targetable = True
+        self.harmful = self.state == "drift"
+        self.glub_t -= dt
+        if self.glub_t <= 0:
+            self.glub_t = self.rng.uniform(2.0, 3.5)
+            events.append(("glub", self))
+
+    def latch(self):
+        self.state, self.t, self.shake = "latched", 0.0, 0.0
+        self.targetable = self.harmful = False
+
+    def release(self, nx, ny):
+        self.state, self.t = "dazed", 0.0
+        self.heading = math.atan2(ny, nx)
+        self.x += nx * 0.7; self.y += ny * 0.7
+        self.vz = 60.0
+        self.hit_cool = 2.0
+        self.targetable, self.harmful = True, False
+
+    def flip(self):
+        return False
+
+    def squash(self):
+        p = math.sin(self.spin * (2.6 if self.state == "latched" else 1.4))   # the bell pulses as it swims (or feeds)
+        return 1.0 + 0.06 * p, 1.0 - 0.07 * p
+
+
+BEETLE_CRUISE = (80.0, 125.0)   # px: below a cruising Jetman, above a walking one
+MINE_ARM, MINE_FUSE, MINE_LIFE = 1.0, 0.45, 22.0
+MINE_TRIGGER, MINE_TRIGGER_Z = 1.1, 70.0     # tiles / px: how close sets a mine off
+MINE_BLAST, MINE_BLAST_Z = 1.7, 95.0         # tiles / px: reach of the blast
+MINE_HIT = 22.0                              # stamina
+MINES_PER_BEETLE = 3
+
+
+class Beetle:
+    """Level 6: a Mine Beetle. Buzzes about at low altitude; when Jetman is about it flies to
+    where he is heading and drops a glowing spore mine there, then veers away. A mine arms
+    after a second, blinks, and goes off when he comes close to the ground near it."""
+    kind = "beetle"
+    variant = "beetle"
+
+    def __init__(self, uid, x, y, seed, speed=1.0):
+        self.uid, self.x, self.y = uid, x, y
+        self.rng = random.Random(seed)
+        self.heading = self.rng.uniform(0, math.tau)
+        self.speed = speed
+        self.cruise = self.rng.uniform(*BEETLE_CRUISE)
+        self.z = self.cruise
+        self.vx = self.vy = self.vz = 0.0
+        self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
+        self.spin, self.spin_rate = self.rng.uniform(0, 10), 0.0
+        self.mode, self.mode_t = "patrol", 0.0
+        self.lay_cool = self.rng.uniform(1.0, 2.5)
+        self.buzz_t = self.rng.uniform(0.2, 1.0)
+        self.mines = 0                       # how many of its mines are still about (the game keeps count)
+        self.last_j, self.jv = None, [0.0, 0.0]
+        self.targetable = self.harmful = True
+
+    def update(self, dt, world, jx, jy, events, jz=0.0):
+        self.hit_cool -= dt
+        self.mode_t -= dt
+        self.lay_cool -= dt
+        self.spin += dt * 22
+        if self.last_j is not None and dt > 0:
+            k = min(1.0, dt * 3)
+            self.jv[0] += ((jx - self.last_j[0]) / dt - self.jv[0]) * k
+            self.jv[1] += ((jy - self.last_j[1]) / dt - self.jv[1]) * k
+        self.last_j = (jx, jy)
+        dx, dy = jx - self.x, jy - self.y
+        d = math.hypot(dx, dy)
+        if self.mode == "patrol":
+            if self.rng.random() < dt * 0.7:
+                self.heading += self.rng.uniform(-1.3, 1.3)
+            sp = 1.6
+            if d < 13.0 and self.mode_t <= 0:
+                self.mode = "attack"
+        if self.mode == "attack":
+            tx, ty = jx + self.jv[0] * 1.1, jy + self.jv[1] * 1.1      # where he'll be in a second
+            want = math.atan2(ty - self.y, tx - self.x)
+            diff = (want - self.heading + math.pi) % math.tau - math.pi
+            self.heading += max(-2.6 * dt, min(2.6 * dt, diff))
+            sp = 3.3
+            if (math.hypot(tx - self.x, ty - self.y) < 2.5 or d < 2.0) and self.lay_cool <= 0:
+                if self.mines < MINES_PER_BEETLE:
+                    events.append(("lay", self))
+                self.lay_cool = 2.6
+                self.mode, self.mode_t = "away", 1.3
+                self.heading += self.rng.choice((1, -1)) * 1.3
+            elif d > 16.0:
+                self.mode = "patrol"
+        elif self.mode == "away":
+            sp = 3.0
+            if self.mode_t <= 0:
+                self.mode = "attack" if d < 13.0 else "patrol"
+        sp *= self.speed
+        self.vx, self.vy = math.cos(self.heading) * sp, math.sin(self.heading) * sp
+        self.x += self.vx * dt; self.y += self.vy * dt
+        self.floor = world.floor_at(self.x, self.y)
+        tz = self.floor + self.cruise + 10 * math.sin(self.spin * 0.13)
+        if self.mode == "attack" and d < 7.0:            # closing in: it comes up (or down) to his height
+            tz = max(self.floor + 55, min(self.floor + 260, jz + 6))
+        self.z += (tz - self.z) * min(1.0, dt * 1.6)
+        self.z = max(self.z, self.floor + 55)
+        self.buzz_t -= dt
+        if self.buzz_t <= 0:
+            self.buzz_t = 0.55
+            events.append(("buzz", self))
+
+    def flip(self):
+        return (self.vx - self.vy) < 0
+
+    def squash(self):
+        return 0.88 + 0.12 * abs(math.sin(self.spin)), 1.0          # wing beat (vertical)
+
+
+class Mine:
+    """A Mine Beetle's spore mine: falls, lands, arms, blinks; goes off near Jetman (or when shot)."""
+    kind = "mine"
+    variant = "mine"
+    harmful = False
+
+    def __init__(self, uid, x, y, z, owner=None):
+        self.uid, self.x, self.y, self.z = uid, x, y, z
+        self.owner = owner
+        self.vx = self.vy = 0.0
+        self.vz = -20.0
+        self.floor, self.hit_cool, self.land_t = 0.0, 0.0, 9.0
+        self.spin, self.spin_rate = 0.0, 0.0
+        self.state, self.t, self.age = "fall", 0.0, 0.0
+        self.targetable = False
+
+    def update(self, dt, world, jx, jy, events, jz=0.0):
+        self.age += dt
+        self.t += dt
+        self.spin += dt
+        if self.state == "fall":
+            self.vz -= 300.0 * dt
+            self.z += self.vz * dt
+            self.floor = world.floor_at(self.x, self.y)
+            if self.z <= self.floor:
+                self.z, self.state, self.t, self.land_t = self.floor, "landed", 0.0, 0.0
+                events.append(("thud", self))
+        elif self.state == "landed":
+            self.land_t += dt
+            if self.t >= MINE_ARM:
+                self.state, self.t = "armed", 0.0
+                events.append(("arm", self))
+        elif self.state == "armed":
+            if (jx - self.x) ** 2 + (jy - self.y) ** 2 < MINE_TRIGGER ** 2 and jz - self.z < MINE_TRIGGER_Z:
+                self.state, self.t = "fuse", 0.0
+                events.append(("fuse", self))
+            elif self.age > MINE_LIFE:
+                events.append(("expire", self))
+        elif self.state == "fuse" and self.t >= MINE_FUSE:
+            self.state = "gone"
+            events.append(("blast", self))
+        self.targetable = self.state in ("landed", "armed", "fuse")
+
+    def blink(self):
+        """0..1 brightness of its warning light."""
+        if self.state == "fuse":
+            return 1.0 if int(self.t * 16) % 2 == 0 else 0.25
+        if self.state == "armed":
+            return 1.0 if (self.t % 1.1) < 0.18 else 0.2
+        return 0.15
+
+    def flip(self):
+        return False
+
+    def squash(self):
+        if self.land_t < 0.2:
+            k = math.sin(self.land_t / 0.2 * math.pi)
+            return 1 + 0.2 * k, 1 - 0.2 * k
+        return 1.0, 1.0
+
+
+PAINTED_KINDS = ("creeper", "flyer", "worm", "leech", "beetle")
+LEVEL_MIX = {1: [("spore", 1.0)], 2: [("creeper", 0.75), ("spore", 0.25)], 3: [("flyer", 0.6), ("creeper", 0.4)],
+             4: [("worm", 0.4), ("creeper", 0.2), ("flyer", 0.25), ("spore", 0.15)],
+             5: [("leech", 0.35), ("worm", 0.2), ("flyer", 0.15), ("creeper", 0.15), ("spore", 0.15)],
+             6: [("beetle", 0.3), ("leech", 0.2), ("worm", 0.2), ("flyer", 0.15), ("creeper", 0.15)]}
+NEW_KIND = {1: "spore", 2: "creeper", 3: "flyer", 4: "worm", 5: "leech", 6: "beetle"}
 
 
 def level_kinds(level):
     if level in LEVEL_MIX:
         return LEVEL_MIX[level]
-    return [("spore", 0.3), ("creeper", 0.35), ("flyer", 0.35)]
+    return [("beetle", 0.2), ("leech", 0.2), ("worm", 0.2), ("flyer", 0.15), ("creeper", 0.15), ("spore", 0.1)]
 
 
 def level_new_kind(level):
-    """The alien type that is new on this level (for the level card)."""
-    return {1: "spore", 2: "creeper", 3: "flyer"}.get(level)
+    """The alien type that is new on this level (for the level card and intro)."""
+    return NEW_KIND.get(level)
 
 
 def chunk_aliens_level(ci, cj, level):
@@ -515,7 +869,7 @@ def chunk_aliens_level(ci, cj, level):
     r = wd.chunk_rng(ci, cj, 21 + 97 * level)
     mix = level_kinds(level)
     out = []
-    for i in range(r.choice((0, 0, 1, 1, 1, 2, 2))):
+    for i in range(r.choice((0, 0, 1, 1, 1, 2, 2) if level < 4 else (0, 1, 1, 1, 2, 2, 2, 3))):
         u = r.random(); acc = 0.0; kind = mix[-1][0]
         for k, w in mix:
             acc += w
@@ -532,4 +886,10 @@ def make_alien(uid, x, y, kind, variant, seed, level):
         return Creeper(uid, x, y, seed, speed)
     if kind == "flyer":
         return Flyer(uid, x, y, seed, speed)
+    if kind == "worm":                    # never faster than a walking Jetman underground
+        return Worm(uid, x, y, seed, min(1.16, 1.0 + 0.08 * max(0, level - 4)))
+    if kind == "leech":
+        return Leech(uid, x, y, seed, 1.0 + 0.08 * max(0, level - 5))
+    if kind == "beetle":
+        return Beetle(uid, x, y, seed, 1.0 + 0.08 * max(0, level - 6))
     return Alien(uid, x, y, variant, seed)
