@@ -93,9 +93,23 @@ START = (8.5, 8.5)
 BEACON_CORRIDOR = 8.0     # tiles either side of the Jetman-to-base line that turn a beacon red
 
 
+GUN_Z = 1.26 * 64 * 0.866 + 2   # px: the laser leaves the barrel this far above Jetman's feet (~72)
+# Aim help. The gun is held at chest height, well above a Rock Creeper's back, so a level beam
+# sailed straight over every crawler. When an alien is roughly ahead, the beam now tilts up or
+# down to meet it (ground aliens: a lot, so a low Jetman can shoot crawlers; airborne ones: only a
+# nudge, so Void Rays and Seeker Spores still need you at the right height), and for ground aliens
+# it also swings a few degrees sideways onto the target.
+AIM_CONE = math.radians(14)      # how far off the facing an alien can be and still be considered
+AIM_YAW = {"creeper": math.radians(5), "spore": math.radians(4)}       # sideways snap; others none
+AIM_DZ = {"creeper": (-110, 60), "spore": (-110, 70), "flyer": (-20, 20), "seeker": (-20, 20)}
+AIM_RANGE = 13.0                 # tiles from the barrel
+HIT_R, HIT_DZ = 0.75, 55         # hit box: tiles across, px above or below the body centre
+
+
 class Laser:
-    def __init__(self, x, y, z, a, col):
+    def __init__(self, x, y, z, a, col, dz=0.0):
         self.x, self.y, self.z, self.a = x, y, z, a
+        self.dz = dz                 # px of climb (+) or drop (-) per tile travelled
         self.x0, self.y0 = x, y
         self.t = 0.0
         self.col = col
@@ -325,8 +339,9 @@ class Game(Campaign):
         self.fire_t += dt
         if keys.get("fire") and self.cool <= 0:
             self.laser_n += 1
-            self.lasers.append(Laser(self.x + fx * 0.75, self.y + fy * 0.75, self.z + 1.26 * 64 * 0.866 + 2, self.a,
-                                     LASER_COLS[self.laser_n % len(LASER_COLS)]))
+            mx, my, mz = self.x + fx * 0.75, self.y + fy * 0.75, self.z + GUN_Z
+            _, ang, dz = self.aim(mx, my, mz, self.a)
+            self.lasers.append(Laser(mx, my, mz, ang, LASER_COLS[self.laser_n % len(LASER_COLS)], dz))
             self.cool = 0.13
             self.fire_t = 0.0
             self.sfx.play("phaser")
@@ -338,7 +353,7 @@ class Game(Campaign):
                 continue
             step = LASER_SPEED * dt
             for i in range(4):
-                L.x += math.cos(L.a) * step / 4; L.y += math.sin(L.a) * step / 4
+                L.x += math.cos(L.a) * step / 4; L.y += math.sin(L.a) * step / 4; L.z += L.dz * step / 4
                 hit = self.alien_hit(L)
                 if hit:
                     L.dead = 1e-6
@@ -486,9 +501,49 @@ class Game(Campaign):
     def alien_hit(self, L):
         for a in self.aliens.values():
             # generous: a 0.75-tile radius and 55 px of height around the body (was 0.42 / 34)
-            if (a.x - L.x) ** 2 + (a.y - L.y) ** 2 < 0.75 ** 2 and abs(L.z - (a.z + al.KINDS[a.kind][6])) < 55:
+            if (a.x - L.x) ** 2 + (a.y - L.y) ** 2 < HIT_R ** 2 and abs(L.z - (a.z + al.KINDS[a.kind][6])) < HIT_DZ:
                 return a
         return None
+
+    def aim(self, mx, my, mz, a):
+        """Aim help for a shot from the barrel (mx, my, mz) facing a: returns (alien or None,
+        beam heading, beam tilt in px per tile). Picks the alien nearest the line of fire."""
+        ca, sa = math.cos(a), math.sin(a)
+        best, bs_ = None, 9.0
+        for al_ in self.aliens.values():
+            dx, dy = al_.x - mx, al_.y - my
+            along = dx * ca + dy * sa
+            if not 0.2 < along < AIM_RANGE:
+                continue
+            side = -dx * sa + dy * ca
+            off = math.atan2(abs(side), along)
+            # within the cone, or close enough that the hit box would catch it anyway
+            if off > AIM_CONE and abs(side) > HIT_R:
+                continue
+            lo, hi = AIM_DZ.get(al_.kind, (-20, 20))
+            need = al_.z + al.KINDS[al_.kind][6] - mz
+            if not lo - HIT_DZ * 0.6 < need < hi + HIT_DZ * 0.6:
+                continue                                  # far too high or low: no help
+            score = off + 0.02 * along
+            if score < bs_:
+                best, bs_ = al_, score
+        if best is None:
+            return None, a, 0.0
+        dx, dy = best.x - mx, best.y - my
+        d = max(0.3, math.hypot(dx, dy))
+        want = math.atan2(dy, dx)
+        diff = (want - a + math.pi) % math.tau - math.pi
+        yaw = AIM_YAW.get(best.kind, 0.0)
+        ang = a + max(-yaw, min(yaw, diff))
+        lo, hi = AIM_DZ.get(best.kind, (-20, 20))
+        need = best.z + al.KINDS[best.kind][6] - mz
+        return best, ang, max(lo, min(hi, need)) / d
+
+    def can_hit_height(self, a):
+        """True if a shot from where Jetman is now could reach this alien's height (with the aim help)."""
+        lo, hi = AIM_DZ.get(a.kind, (-20, 20))
+        need = a.z + al.KINDS[a.kind][6] - (self.z + GUN_Z)
+        return lo - HIT_DZ * 0.8 < need < hi + HIT_DZ * 0.8
 
     def pop(self, a):
         """Splat: spike fragments, goo, sparks and a flash."""
@@ -1096,7 +1151,7 @@ class Game(Campaign):
             ca, sa = math.cos(L.a), math.sin(L.a)
             back = min(2.6, math.hypot(L.x - L.x0, L.y - L.y0))
             x1, y1 = to_screen(L.x, L.y, L.z)
-            x0, y0 = to_screen(L.x - ca * back, L.y - sa * back, L.z)
+            x0, y0 = to_screen(L.x - ca * back, L.y - sa * back, L.z - L.dz * back)
             p0, p1 = (x0 - cx, y0 - cy), (x1 - cx, y1 - cy)
             fade = 1 - L.dead / 0.08 if L.dead else 1
             col = tuple(int(c * fade) for c in L.col)

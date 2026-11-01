@@ -77,6 +77,46 @@ def run(game_cls, screen):
     g.alien_killed(a)
     check("alien kill scores with a popup", g.score == sc0 + al.KINDS[a.kind][2] and len(g.popups) == n0 + 1)
 
+    # the laser can hit a Rock Creeper (they sit below the barrel, so a level beam used to fly over them)
+    def clear_line(bearing, dist):
+        sx, sy = g.world.start
+        for r in range(20, 300, 2):
+            for k in range(12):
+                x, y = sx - r * math.cos(k), sy - r * math.sin(k)
+                if all(not g.world.blocked(x + math.cos(bearing + t) * d, y + math.sin(bearing + t) * d, 0, 0.1)
+                       and abs(g.world.floor_at(x + math.cos(bearing + t) * d, y + math.sin(bearing + t) * d)) < 0.5
+                       for d in [i * 0.25 for i in range(int(dist * 4) + 6)] for t in (-0.45, -0.2, 0, 0.2, 0.45)):
+                    return x, y
+        return sx, sy
+
+    def shoot_at(kind, dist, alt, off_deg, z=None):
+        g.x, g.y = clear_line(0.9, dist)
+        g.vx = g.vy = g.vz = 0.0
+        g.update_aliens(0.0)                              # let the chunks here release their aliens...
+        g.aliens.clear(); g.lasers.clear()                # ...then take them away: just the target
+        g.safe_t, g.hit_t = 99.0, 9.0
+        fl = g.floor()
+        ax, ay = g.x + math.cos(0.9) * dist, g.y + math.sin(0.9) * dist
+        a = al.make_alien(("selftest", kind), ax, ay, kind, "green", 1, 3)
+        a.z = g.world.floor_at(ax, ay) if z is None else z
+        a.update = lambda *args, **kw: None               # stands still for the test
+        g.aliens[a.uid] = a
+        g.a, g.cool = 0.9 + math.radians(off_deg), 0.0
+        g.z = fl + alt
+        g.update(1 / 60, dict(idle, fire=1))
+        for _ in range(40):
+            g.z, g.vz = fl + alt, 0.0
+            g.update(1 / 60, idle)
+        hit = a.uid not in g.aliens
+        g.aliens.pop(a.uid, None)
+        return hit
+    check("laser hits a crawler from the ground in front of it", all(shoot_at("creeper", d, 0, 0) for d in (2.0, 4.0, 7.0)))
+    check("laser hits a crawler a little off the line", shoot_at("creeper", 5.0, 0, 7))
+    check("a shot well wide of a crawler misses", not shoot_at("creeper", 5.0, 0, 25))
+    check("a crawler can't be hit from high above", not shoot_at("creeper", 5.0, 160, 0))
+    check("a Void Ray far above the beam isn't helped down", not shoot_at("flyer", 5.0, 0, 0, z=200.0))
+    check("a Void Ray level with the beam is hit", shoot_at("flyer", 5.0, 150, 0, z=170.0))
+
     # the Alien Missile Base and its spores
     def seekers():
         return [a for a in g.aliens.values() if a.kind == "seeker"]

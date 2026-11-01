@@ -110,7 +110,7 @@ class Bot:
                 # shoot what's close on the way (only if it's level with the beam)
                 if self.shoots and a and d < 4.5:
                     ang = math.atan2(a.y - g.y, a.x - g.x)
-                    if abs((ang - g.a + math.pi) % math.tau - math.pi) < 0.3 and abs(a.z - g.z) < 60:
+                    if abs((ang - g.a + math.pi) % math.tau - math.pi) < 0.3 and g.can_hit_height(a):
                         k["fire"] = 1
         if self.phase == "fly":
             bx, by = g.world.base
@@ -127,7 +127,7 @@ class Bot:
             if dist < 2.6 and g.z > 168 and b.state == "carried":
                 g.handle_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_b))
                 self.phase = "away"
-            if self.shoots and a and d < 6 and abs(a.z + 16 - (g.z + 72)) < 50:
+            if self.shoots and a and d < 6 and g.can_hit_height(a):
                 ang = math.atan2(a.y - g.y, a.x - g.x)
                 if abs((ang - g.a + math.pi) % math.tau - math.pi) < 0.35:
                     k["fire"] = 1
@@ -160,7 +160,7 @@ class Bot:
         da = self.steer(best.x, best.y, k, 0.05)
         if bd < 3.5:
             k.pop("up", None)                      # stand off while it comes into the beam
-        if abs(da) < 0.3 and abs(best.z + 14 - (g.z + 72)) < 50 and self.rng.random() < self.FIRE_P:
+        if abs(da) < 0.3 and g.can_hit_height(best) and self.rng.random() < self.FIRE_P:
             k["fire"] = 1                          # tapping fire, not holding it
 
 
