@@ -19,13 +19,14 @@ import pygame
 import aa
 import aliens as al
 import base as bs
+import gamepad
 import rover as rv
 import scores
 import world as wd
 from world import to_screen
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-W, H = 1280, 720
+W, H = 1280, 720          # internal frame. A television scales this; nothing draws in panel pixels.
 
 # ---------------------------------------------------------------- tuning
 FUEL_MAX = 100.0
@@ -95,6 +96,8 @@ class Campaign:
         if online:
             self.board.refresh()
         self.entry_active, self.entry_name, self.entry_note = False, "", ""
+        self.entry_pos = 0             # pad name entry: which letter the stick is on
+        self.pad_on = False            # a gamepad is connected: hints name its buttons
         self.qualified = False
         self.paint = al.PaintedSprites()
         img = pygame.image.load(BOMB_ART)
@@ -469,6 +472,61 @@ class Campaign:
             self.mode_t = CARD_TIME
         return None
 
+    def handle_pad_edges(self, edges):
+        """Discrete pad presses. Held sticks and buttons go through the key dict instead.
+
+        Returns 'quit' to leave the process (title screen Back, or Esc from the title).
+        """
+        if not edges:
+            return None
+        rank = {name: i for i, name in enumerate((
+            "menu_left", "menu_right", "menu_up", "menu_down",
+            "fire", "extra", "cancel", "pause", "confirm"))}
+        for action in sorted(edges, key=lambda a: rank.get(a, 50)):
+            result = self._pad_action(action)
+            if result == "quit":
+                return "quit"
+        return None
+
+    def _pad_action(self, action):
+        playing = self.mode in ("play", "boom") and not self.paused
+        if action == "pause":
+            # Start pauses a game. On a menu, where there is nothing to pause, it confirms.
+            if self.mode == "title":
+                return self.handle_key(self._ev(pygame.K_RETURN))
+            if self.mode == "over":
+                return self.handle_key(self._ev(pygame.K_RETURN))
+            if self.mode == "card":
+                return self.handle_key(self._ev(pygame.K_RETURN))
+            return self.handle_key(self._ev(pygame.K_p))
+        if action == "confirm":
+            if playing:
+                return None                       # A is the jetpack, held, not a key press
+            return self.handle_key(self._ev(pygame.K_RETURN))
+        if action == "cancel":
+            if self.mode == "over" and self.entry_active:
+                return self.handle_key(self._ev(pygame.K_ESCAPE))
+            if playing:
+                return self.handle_key(self._ev(pygame.K_b))   # drop the bomb
+            return self.handle_key(self._ev(pygame.K_ESCAPE))
+        if action == "extra":
+            if playing:
+                return self.handle_key(self._ev(pygame.K_b))
+            return None
+        if action == "fire":
+            if self.mode == "over" and self.entry_active:
+                self.entry_pad_delete()
+            return None
+        if action in ("menu_up", "menu_down", "menu_left", "menu_right"):
+            if self.mode == "over" and self.entry_active:
+                self.entry_pad_move(action)
+            return None
+        return None
+
+    @staticmethod
+    def _ev(key):
+        return pygame.event.Event(pygame.KEYDOWN, key=key, mod=0, unicode="")
+
     def set_paused(self, on):
         if on and self.mode not in ("play", "boom", "dying", "card"):
             return
@@ -485,6 +543,7 @@ class Campaign:
                     if ch == " " and (not self.entry_name or self.entry_name.endswith(" ")):
                         continue
                     self.entry_name += ch
+            self.entry_pos = len(self.entry_name)
 
     def entry_key(self, key):
         if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -500,6 +559,7 @@ class Campaign:
             self._stop_text()
         elif key == pygame.K_BACKSPACE:
             self.entry_name = self.entry_name[:-1]
+            self.entry_pos = min(self.entry_pos, len(self.entry_name))
 
     @staticmethod
     def _stop_text():
@@ -516,6 +576,7 @@ class Campaign:
         self.entry_active = self.qualified
         if self.entry_active:
             self.entry_name = self.board.last_name
+            self.entry_pos = 0
             try:
                 pygame.key.start_text_input()
             except Exception:
@@ -802,7 +863,12 @@ class Campaign:
             self.veil(120)
             self.band(250, 200, 190)
             self.ctext(self.f_big, "PAUSED", (240, 240, 240), 290)
-            self.ctext(self.f_hud, "P or Enter to carry on      Esc to quit to the title screen", (200, 200, 200), 380)
+            lines = gamepad.pause_lines(self.pad_on)
+            if len(lines) == 1:
+                self.ctext(self.f_hud, lines[0], (200, 200, 200), 380)
+            else:
+                self.ctext(self.f_hud, lines[0], (200, 200, 200), 386)
+                self.ctext(self.f_hud, lines[1], (200, 200, 200), 420)
 
     def draw_popups(self):
         """Floating '+500' scores where an alien or the base was destroyed."""
@@ -876,19 +942,86 @@ class Campaign:
         if self.over_reason and not self.entry_active:
             self.ctext(self.f_hud, self.over_reason, (255, 160, 140), 246)
         if self.entry_active:
-            self.ctext(self.f_mid, "You made the Top 10! Type your name:", (235, 235, 235), 280)
-            cur = "_" if int(self.t * 2) % 2 == 0 else " "
+            self.ctext(self.f_mid, gamepad.entry_heading(self.pad_on), (235, 235, 235), 280)
             box = pygame.Rect(W // 2 - 200, 330, 400, 56)
             pygame.draw.rect(self.screen, (20, 24, 30), box)
             pygame.draw.rect(self.screen, (255, 200, 90), box, 2)
-            self.ctext(self.f_big, self.entry_name + cur, (255, 255, 255), 334)
-            self.ctext(self.f_hud, f"Up to {scores.NAME_MAX} letters or numbers.   Enter to save, Esc to skip", (180, 180, 180), 400)
+            self.ctext(self.f_big, self.entry_shown(), (255, 255, 255), 334)
+            hint = gamepad.entry_hint(self.pad_on, scores.NAME_MAX)
+            self.ctext(self.f_hud, hint, (180, 180, 180), 400)
         else:
             msg = self.entry_status()
             if msg:
                 self.ctext(self.f_mid, msg, (200, 230, 255), 290)
             self.draw_top10(440)
-            self.ctext(self.f_hud, "Press Enter to return to the title screen", (200, 200, 200), 660)
+            self.ctext(self.f_hud, gamepad.over_prompt(self.pad_on), (200, 200, 200), 660)
+
+    # Pad name entry. Up and down cycle the letter in the brackets, left and
+    # right move, A accepts (the same as Enter), B skips, X deletes a letter.
+    _ENTRY_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+
+    def entry_shown(self):
+        name = self.entry_name
+        if not self.pad_on:
+            cur = "_" if int(self.t * 2) % 2 == 0 else " "
+            return name + cur
+        pos = self.entry_pos
+        if pos < 0:
+            pos = 0
+        blink = "_" if int(self.t * 2) % 2 == 0 else " "
+        if pos >= len(name):
+            return name + "[" + blink + "]"
+        return name[:pos] + "[" + name[pos] + "]" + name[pos + 1:]
+
+    def entry_pad_move(self, action):
+        name = self.entry_name
+        pos = self.entry_pos
+        if pos < 0:
+            pos = 0
+        if action == "menu_left":
+            self.entry_pos = max(0, pos - 1)
+            return
+        if action == "menu_right":
+            if len(name) >= scores.NAME_MAX:
+                self.entry_pos = min(max(0, len(name) - 1), pos + 1)
+            else:
+                self.entry_pos = min(len(name), pos + 1)
+            return
+        if action not in ("menu_up", "menu_down"):
+            return
+        if pos > len(name):
+            pos = len(name)
+        if pos == len(name):
+            if len(name) >= scores.NAME_MAX:
+                self.entry_pos = max(0, len(name) - 1)
+                return
+            # The first press on an empty slot starts at A; the next one cycles.
+            self.entry_name = name + "A"
+            self.entry_pos = pos
+            return
+        delta = 1 if action == "menu_up" else -1
+        ch = name[pos].upper()
+        chars = self._ENTRY_CHARS
+        idx = chars.index(ch) if ch in chars else 0
+        if ch not in chars:
+            nxt = chars[0]
+        else:
+            nxt = chars[(idx + delta) % len(chars)]
+        self.entry_name = name[:pos] + nxt + name[pos + 1:]
+        self.entry_pos = pos
+
+    def entry_pad_delete(self):
+        name = self.entry_name
+        pos = self.entry_pos
+        if not name:
+            self.entry_pos = 0
+            return
+        if pos >= len(name):
+            self.entry_name = name[:-1]
+            self.entry_pos = len(self.entry_name)
+            return
+        self.entry_name = name[:pos] + name[pos + 1:]
+        self.entry_pos = min(pos, len(self.entry_name))
 
     def entry_status(self):
         name = self.entry_note
@@ -935,10 +1068,7 @@ class Campaign:
 
     def draw_controls(self, py):
         sc = self.screen
-        lines = ["Left / Right: turn      Up / Down: forwards / backwards      Space: jetpack",
-                 "Ctrl or Z: fire      B: drop the bomb      P: pause      F: full screen      Esc: quit",
-                 "Carry the bomb from the rover to the Alien Missile Base and drop it on the dome.",
-                 "Watch your stamina: aliens bite chunks out of it. Rest on the rover roof to recover."]
+        lines = gamepad.control_lines(self.pad_on)
         panel = self._tc.get("controls_panel")
         if panel is None:
             panel = self._tc["controls_panel"] = pygame.Surface((960, 160), pygame.SRCALPHA)
@@ -1036,7 +1166,7 @@ class Campaign:
             pygame.draw.rect(sc, (120, 210, 255), (W // 2 - 199, 501, int(398 * ready_frac), 8))
         else:
             if int(t * 1.6) % 2 == 0:
-                self.ctext(self.f_mid, "Press Enter to start", (255, 255, 255), 452)
+                self.ctext(self.f_mid, gamepad.title_prompt(self.pad_on), (255, 255, 255), 452)
             if int(t / TOP10_TIME) % 2 == 1:
                 self.draw_top10(490)
             else:

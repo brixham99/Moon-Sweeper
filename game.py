@@ -7,6 +7,7 @@ bounce about the surface for him to sweep up with his laser.
 
 Run:            python3 game.py            (1280x720 window; F toggles full screen, Esc quits)
                 python3 game.py --fullscreen
+                ZENSTATION=1 python3 game.py   (television: native full screen, no cursor)
 Screenshots:    python3 game.py --shot NAME [SCENE]   -> ../lunar_poc/NAME.png
                 python3 game.py --facings NAME        -> ../lunar_poc/NAME.png
 Benchmark:      python3 game.py --bench
@@ -34,9 +35,11 @@ from campaign import Campaign, HIT_GRACE
 import rover as rv
 import base as bs
 import sfx as sx
+import fullscreen
+import gamepad
 from jetman import JetmanSprites
 
-W, H = 1280, 720
+W, H = fullscreen.INTERNAL          # the frame the game draws. The window may be larger.
 
 
 def sprite_cache_path():
@@ -1823,14 +1826,13 @@ def alien_sheet(screen, out):
 
 
 def main():
-    pygame.init()
     headless = any(a in sys.argv for a in ("--shot", "--bench", "--facings", "--aliens", "--loadshot", "--selftest", "--playthrough"))
-    if headless:
-        screen = pygame.display.set_mode((W, H))
-    elif "--fullscreen" in sys.argv:
-        screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN | pygame.SCALED)
-    else:                                   # start in a 1280x720 window; F toggles full screen
-        screen = pygame.display.set_mode((W, H), pygame.SCALED)
+    tv = fullscreen.tv_requested() and not headless
+    if tv:
+        # labwc draws its own decorations unless this is set before SDL starts.
+        os.environ.setdefault("SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR", "0")
+    pygame.init()
+    screen, presenter = fullscreen.open_display((W, H), headless=headless, tv=tv)
     pygame.display.set_caption("Moon Sweeper")
     outdir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lunar_poc"))
     os.makedirs(outdir, exist_ok=True)
@@ -1910,26 +1912,44 @@ def main():
               f"cached now {len(game.world.ground)}")
         return
     clock = pygame.time.Clock()
+    pads = gamepad.Pads()
     # title screen while the world loads in the background (never blocks); Enter starts
     game.mode, game.title_t = "title", 0.0
     game.music(True)
     t_start = time.time()
     total = 1
+
+    def leave():
+        """Back to the launcher. Exit code 0."""
+        pygame.quit()
+
     while True:
-        dt = min(clock.tick(FPS) / 1000.0, 1 / 20)
+        raw = clock.tick(FPS) / 1000.0
+        dt = min(raw, 1 / 20)
         for e in pygame.event.get():
+            if pads.event(e):
+                continue
             if e.type == pygame.QUIT:
-                pygame.quit(); return
+                leave(); return
             if e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_f and not (game.mode == "over" and game.entry_active):
-                    pygame.display.toggle_fullscreen()
+                if e.key == pygame.K_f and presenter.allows_toggle and not (game.mode == "over" and game.entry_active):
+                    try:
+                        pygame.display.toggle_fullscreen()
+                        pygame.mouse.set_visible(not pygame.display.is_fullscreen())
+                    except pygame.error:
+                        pass
                     continue
                 if game.handle_key(e) == "quit":
-                    pygame.quit(); return
+                    leave(); return
             elif e.type == pygame.TEXTINPUT:
                 game.handle_text(e.text)
             elif e.type in FOCUS_LOST and game.mode in ("play", "boom"):
                 game.set_paused(True)                  # clicked away: don't die while nobody's looking
+        # A long hitch must not skip the hold, but a held Back should still
+        # add up in about a second of real time.
+        if pads.update(min(raw, 0.25)) == "quit" or game.handle_pad_edges(pads.edges()) == "quit":
+            leave(); return
+        game.pad_on = pads.connected()
         ready = total
         if not game.loaded:
             ready, total, msg = game.load_step()
@@ -1943,11 +1963,12 @@ def main():
             k = pygame.key.get_pressed()
             keys = {"left": k[pygame.K_LEFT], "right": k[pygame.K_RIGHT], "up": k[pygame.K_UP], "down": k[pygame.K_DOWN],
                     "jet": k[pygame.K_SPACE], "fire": k[pygame.K_LCTRL] or k[pygame.K_RCTRL] or k[pygame.K_z]}
+            keys = pads.apply(keys)
             if not game.paused:
                 game.update(dt, keys)
             game.draw()
         game.fps = clock.get_fps() or game.fps
-        pygame.display.flip()
+        presenter.flip()
 
 
 if __name__ == "__main__":

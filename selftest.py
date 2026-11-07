@@ -22,6 +22,12 @@ def run(game_cls, screen):
         if not ok:
             fails.append(name)
 
+    import fullscreen
+    import gamepad
+    screen = fullscreen.self_check(check)
+    for name, ok, info in gamepad.self_check():
+        check(name, ok, info)
+
     t0 = time.time()
     g = game_cls(screen)
     g.wait_ready(); g.loaded = True
@@ -331,5 +337,82 @@ def run(game_cls, screen):
         g.update(1 / 60, idle)
     check("out of stamina: game over", g.mode == "over" and "stamina" in g.over_reason, f"{g.mode} {g.over_reason!r}")
     g.draw()
+
+    # Analogue sticks use the same key dict as the keyboard, with a fraction instead of 0 or 1.
+    g.new_game()
+    a0 = g.a
+    g.update(1 / 60, dict(idle, right=1))
+    full = g.a - a0
+    a1 = g.a
+    g.update(1 / 60, dict(idle, right=0.5))
+    half = g.a - a1
+    check("a half-tilt turns half as far as a full press", abs(half - full * 0.5) < 1e-6, f"{full:.5f} {half:.5f}")
+
+    # Pad buttons through the same paths as the keys.
+    g.bomb.state = "carried"
+    g.handle_pad_edges(["cancel"])
+    check("pad B drops the bomb", g.bomb.state != "carried", g.bomb.state)
+    g.handle_pad_edges(["extra"])
+    g.bomb.state = "carried"
+    g.handle_pad_edges(["extra"])
+    check("pad Y drops the bomb too", g.bomb.state != "carried", g.bomb.state)
+    g.handle_pad_edges(["pause"])
+    check("pad Start pauses", g.paused)
+    g.handle_pad_edges(["confirm"])
+    check("pad A carries on from the pause", not g.paused and g.mode == "play")
+    g.handle_pad_edges(["pause"])
+    g.handle_pad_edges(["cancel"])
+    check("pad B from the pause returns to the title", g.mode == "title" and not g.paused)
+
+    g.loaded = True
+    g.handle_pad_edges(["confirm"])
+    check("pad A starts a game from the title", g.mode == "play")
+    g.bomb.state = "carried"
+    g.handle_pad_edges(["cancel"])
+    check("pad B during play drops the bomb and stays in the game", g.mode == "play" and g.bomb.state != "carried")
+
+    # Name entry with the stick: up cycles, right moves, A saves, B skips. Keyboard typing still appends.
+    g.mode = "over"
+    g.entry_active = True
+    g.entry_name = "A"
+    g.entry_pos = 0
+    g.score = 50
+    g.pad_on = True
+    g.entry_pad_move("menu_up")
+    check("pad up cycles the letter", g.entry_name == "B", g.entry_name)
+    g.entry_pad_move("menu_right")
+    g.entry_pad_move("menu_up")
+    check("pad right opens the next letter", g.entry_name == "BA" and g.entry_pos == 1, f"{g.entry_name!r} @{g.entry_pos}")
+    g.handle_pad_edges(["fire"])
+    check("pad X deletes the letter", g.entry_name == "B", g.entry_name)
+    g.pad_on = False
+    g.handle_text("ob")
+    check("keyboard typing still appends", g.entry_name == "Bob", g.entry_name)
+    shown = g.entry_shown()
+    check("keyboard name entry still ends with the cursor", shown[:3] == "Bob" and shown[-1] in " _", repr(shown))
+    saved = []
+    g.board.submit = lambda n, s: saved.append((n, s))
+    g.pad_on = True
+    g.entry_pos = 0
+    g.handle_pad_edges(["confirm"])
+    check("pad A saves the name", (not g.entry_active) and saved == [("Bob", 50)], str(saved))
+    g.entry_active = True
+    g.entry_name = "SKIP"
+    g.entry_note = ""
+    g.handle_pad_edges(["cancel"])
+    check("pad B skips name entry", (not g.entry_active) and g.entry_note == "")
+    g.pad_on = True
+    g.mode, g.title_t, g.loaded = "title", 0.0, True
+    g.draw_title(True, 1.0)
+    g.mode = "over"
+    g.entry_active = True
+    g.entry_name = "ADA"
+    g.entry_pos = 0
+    g.t = 0
+    g.screen.fill((0, 0, 0))
+    g.draw_over()
+    g.pad_on = False
+    check("pad hints draw on the title and the name entry", True)
+
     print(f"{'ALL PASSED' if not fails else str(len(fails)) + ' FAILED'} in {time.time() - t0:.1f} s", flush=True)
     return len(fails)
