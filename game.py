@@ -1915,7 +1915,8 @@ def main():
     pads = gamepad.Pads()
     # title screen while the world loads in the background (never blocks); Enter starts
     game.mode, game.title_t = "title", 0.0
-    game.music(True)
+    # The title music waits until the world has finished loading, so the
+    # set-up work can't make it stutter.
     t_start = time.time()
     total = 1
 
@@ -1956,6 +1957,8 @@ def main():
             if ready >= total:
                 game.loaded = True
                 print(f"ready after {time.time() - t_start:.1f} s", flush=True)
+                if game.mode == "title":
+                    game.music(True)
         if game.mode == "title":
             game.title_t += dt
             game.draw_title(game.loaded, min(1.0, ready / max(1, total)))
