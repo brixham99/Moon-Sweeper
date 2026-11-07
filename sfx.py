@@ -328,7 +328,11 @@ class SFX:
         try:
             import pygame
             if not pygame.mixer.get_init():
-                pygame.mixer.pre_init(RATE, -16, 2, 512)
+                # The Pi on a television needs a bigger audio buffer, or the
+                # music drops in and out while the title screen is busy drawing.
+                import os
+                buf = 2048 if os.environ.get("ZENSTATION", "").strip() == "1" else 512
+                pygame.mixer.pre_init(RATE, -16, 2, buf)
                 pygame.mixer.init()
             pygame.mixer.set_num_channels(32)
             pygame.mixer.set_reserved(1 + SPIN_VOICES)
