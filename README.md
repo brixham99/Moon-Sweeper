@@ -1,5 +1,7 @@
 # Moon Sweeper
 
+![Moon Sweeper screenshot](docs/screenshot.png)
+
 An endless, procedurally generated lunar surface in strict 2:1 isometric, with a
 jetpacking Jetman under tank-style controls. pygame 2 + numpy.
 
