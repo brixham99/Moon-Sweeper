@@ -8,7 +8,7 @@ jetpacking Jetman under tank-style controls. pygame 2 + numpy.
 ## Run
     python3 game.py              # 1280x720 window, title screen first (F toggles full screen; Esc on the title quits)
     python3 game.py --fullscreen # start in full screen
-    python3 game.py --shot NAME [walk|high|fire|behind|far]   # -> ../lunar_poc/NAME.png
+    python3 game.py --shot NAME [walk|high|fire|behind|far]   # -> shots/NAME.png
     python3 game.py --facings NAME                             # sprite sheet of all facings
     python3 game.py --bench
     python3 game.py --selftest                     # quick headless checks of the game rules (PASS/FAIL)

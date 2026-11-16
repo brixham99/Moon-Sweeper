@@ -8,8 +8,8 @@ bounce about the surface for him to sweep up with his laser.
 Run:            python3 game.py            (1280x720 window; F toggles full screen, Esc quits)
                 python3 game.py --fullscreen
                 ZENSTATION=1 python3 game.py   (television: native full screen, no cursor)
-Screenshots:    python3 game.py --shot NAME [SCENE]   -> ../lunar_poc/NAME.png
-                python3 game.py --facings NAME        -> ../lunar_poc/NAME.png
+Screenshots:    python3 game.py --shot NAME [SCENE]   -> shots/NAME.png
+                python3 game.py --facings NAME        -> shots/NAME.png
 Benchmark:      python3 game.py --bench
 """
 import math
@@ -1834,7 +1834,7 @@ def main():
     pygame.init()
     screen, presenter = fullscreen.open_display((W, H), headless=headless, tv=tv)
     pygame.display.set_caption("Moon Sweeper")
-    outdir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lunar_poc"))
+    outdir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots"))
     os.makedirs(outdir, exist_ok=True)
     if "--aliens" in sys.argv:
         name = sys.argv[sys.argv.index("--aliens") + 1]
